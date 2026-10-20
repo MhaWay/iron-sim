@@ -101,7 +101,7 @@ fn golden_hash_check() {
     // Never "fix" CI by nudging this number.
     let stream = build_command_stream();
     let h = run_sim(12345, 120, &stream);
-    let golden: u64 = 8418999775060511962; // 0x74D6_4BB0_8C93_4CDA (SIM_VERSION=1); refresh deliberately on intentional sim-math change
+    let golden: u64 = 8358503953490564257; // 0x73FF_5F0F_7980_D4A1 (SIM_VERSION=2, Phase-1 economy: Build/Train/Gather/Map/Vis/Harvest/TrainQueue systems). Refresh deliberately on intentional sim-math change — bump SIM_VERSION first.
     println!("current={:016x} golden={:016x}", h, golden);
     assert_eq!(h, golden, "golden hash mismatch — if sim math changed intentionally, bump SIM_VERSION and update this line");
 }

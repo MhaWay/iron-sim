@@ -1,338 +1,1217 @@
-//! Core simulation: units, orders, movement, combat. Systems are free functions run by
-//! engine-ecs Scheduler in fixed registration order (movement, then combat).
-
+//! Core deterministic RTS sim: units, orders, movement, combat + Phase-1 economy (seeded map,
+//! resource nodes, buildings, training, harvest loops, fog, victory). Systems run in fixed
+/// registration order via the engine-ecs Scheduler; the whole sim is single-threaded, no f32/f64,
+// no default-hash HashMap, deterministic iteration by ECS entity index / Vec order.
+// SIM_VERSION is owned by lib.rs; the golden hash test (tests/determinism.rs) pins the exact
+// state hash this file produces.
 use engine_core::{Fixed1616, Tick};
 use engine_ecs::{Entity, Scheduler, World};
 use engine_path::{find_path, Grid, TilePos};
-use shared::{Command, Hasher};
+use shared::{Command, Hasher, TickCommands, WriteHash};
 
+use crate::economy::{
+    building_spec, unit_spec, Building, BuildingStatus, HarvestState, NodePos, PlayerState,
+    ResourceNode, TrainItem, TrainQueue, Visibility, WorkJob, WorkMode, CARRY, MAP_H, MAP_W,
+    PICK_TICKS, SIGHT_BASE,
+};
 use crate::SIM_VERSION;
 
-pub const MAP_W: u16 = 64;
-pub const MAP_H: u16 = 64;
-pub const SPEED_SCALE: i32 = 1024;
+pub const SPEED_SCALE: i64 = 1024;
+pub const MAX_PLAYERS: usize = 2;
+/// Wonder must be held for this many ticks to win (15 min at 30 Hz).
+pub const VICTORY_WONDER_HOLD: u64 = 30 * 30 * 60;
+/// Civics-point thresholds (docs/design-factions.md Golden Age gate) — data only; AgeUp is
+/// structure-only in this slice, so the table is unreferenced except for documentation.
+const _AGE_THRESHOLDS: [u32; 4] = [0, 300, 700, 1200];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimError {
     UnknownUnit,
     OutOfMap,
     PathUnreachable,
+    Occupied,
+    Unaffordable,
+    BadCommand,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Unit {
-    pub owner: u32,
-    pub hp: u32,
-    pub speed_q: i32,
-    pub dmg: u32,
+    pub owner: u8,
+    pub kind: u16,
+    pub hp: i32,
+    pub speed_q: u32,
+    pub dmg: i32,
     pub range: Fixed1616,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Pos {
     pub x: Fixed1616,
     pub y: Fixed1616,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum Order {
     Idle,
-    Move { path: Vec<TilePos>, waypoint: u32 },
+    Move { path: Vec<TilePos>, waypoint: usize },
     Attack { target: u32 },
+    Harvest { node: u32, path: Vec<TilePos> },
+    Construct { building: u32, path: Vec<TilePos> },
+}
+
+#[inline]
+fn tile_center(x: i16, y: i16) -> (Fixed1616, Fixed1616) {
+    (
+        Fixed1616(((x as i64) << 16) + (1 << 15)),
+        Fixed1616(((y as i64) << 16) + (1 << 15)),
+    )
+}
+
+#[inline]
+fn manhattan(dx: i32, dy: i32) -> i32 {
+    dx.abs() + dy.abs()
+}
+
+#[inline]
+fn tile_of(f: Fixed1616) -> i16 {
+    f.to_int_trunc() as i16
+}
+
+fn hash_path(path: &[TilePos], h: &mut Hasher) {
+    h.write_u64(path.len() as u64);
+    for p in path {
+        h.write_i32(p.x as i32);
+        h.write_i32(p.y as i32);
+    }
 }
 
 impl Order {
     fn hash_into(&self, h: &mut Hasher) {
         match self {
-            Order::Idle => h.u8(0),
+            Order::Idle => h.write_u8(0),
             Order::Move { path, waypoint } => {
-                h.u8(1);
-                h.u32(*waypoint);
-                h.u32(path.len() as u32);
-                for t in path {
-                    h.i16(t.x);
-                    h.i16(t.y);
-                }
+                h.write_u8(1);
+                h.write_u64(*waypoint as u64);
+                hash_path(path, h);
             }
             Order::Attack { target } => {
-                h.u8(2);
-                h.u32(*target);
+                h.write_u8(2);
+                h.write_u32(*target);
             }
+            Order::Harvest { node, path } => {
+                h.write_u8(3);
+                h.write_u32(*node);
+                hash_path(path, h);
+            }
+            Order::Construct { building, path } => {
+                h.write_u8(4);
+                h.write_u32(*building);
+                hash_path(path, h);
+            }
+        }
+    }
+}
+
+/// Harvest deposits queued during a system pass; drained by Sim::step into the stockpiles.
+#[derive(Default)]
+pub struct Deposits(pub Vec<(u8, u8, i32)>);
+
+/// Grid mirror for system-side pathfinding (systems only receive &mut World). Refreshed by
+/// Sim::sync_mirrors at step start; the sim itself never reads it.
+#[derive(Clone)]
+pub struct GridSide {
+    pub w: u16,
+    pub h: u16,
+    pub blocked: Vec<bool>,
+}
+
+#[inline]
+fn gs_is_blocked(gs: &GridSide, x: i16, y: i16) -> bool {
+    if x < 0 || y < 0 || x >= gs.w as i16 || y >= gs.h as i16 {
+        return true;
+    }
+    gs.blocked[(y as usize) * (gs.w as usize) + (x as usize)]
+}
+
+/// Fog mirror: systems set bits here (Entity(2)); Sim::step folds the words back into Sim.vis
+/// before hashing. The authoritative Visibility bitsets live on the Sim.
+#[derive(Clone)]
+pub struct VisMirror {
+    pub words: [Visibility; 2],
+}
+
+impl Default for VisMirror {
+    fn default() -> Self {
+        VisMirror {
+            words: [Visibility::new(0), Visibility::new(1)],
+        }
+    }
+}
+
+/// The complete simulation.
+pub struct Sim {
+    pub world: World,
+    pub grid: Grid,
+    pub scheduler: Scheduler,
+    pub players: Vec<PlayerState>,
+    pub vis: Vec<Visibility>,
+}
+
+impl Sim {
+    pub fn new(seed: u64) -> Sim {
+        let mut world = World::new(seed);
+        let mut scheduler = Scheduler::new();
+        // System order is the determinism contract; reorder == bump SIM_VERSION.
+        scheduler.add_system("construction", construction_system);
+        scheduler.add_system("training", training_system);
+        scheduler.add_system("harvest", harvest_system);
+        scheduler.add_system("movement", movement_system);
+        scheduler.add_system("visibility", visibility_system);
+        scheduler.add_system("combat", combat_system);
+        world.storages.add(Entity(0), Deposits::default());
+        world.storages.add(
+            Entity(1),
+            GridSide {
+                w: MAP_W,
+                h: MAP_H,
+                blocked: vec![false; (MAP_W * MAP_H) as usize],
+            },
+        );
+        world.storages.add(Entity(2), VisMirror::default());
+        let grid = Self::generate_map(&mut world);
+        let players = (0..MAX_PLAYERS).map(|_| PlayerState::new()).collect();
+        let vis = (0..MAX_PLAYERS)
+            .map(|i| Visibility::new(i as u32))
+            .collect();
+        let mut sim = Sim {
+            world,
+            grid,
+            scheduler,
+            players,
+            vis,
+        };
+        sim.spawn_default_squads();
+        sim
+    }
+
+    pub fn tick(&self) -> Tick {
+        self.world.tick
+    }
+
+    pub fn alive_units(&self) -> usize {
+        self.world.storages.iter::<Unit>().count()
+    }
+
+    /// Refresh the GridSide / VisMirror side-storages so systems see current data.
+    fn sync_mirrors(&mut self) {
+        if let Some(gs) = self.world.storages.get_mut::<GridSide>(Entity(1)) {
+            gs.blocked.clear();
+            for y in 0..MAP_H as i16 {
+                for x in 0..MAP_W as i16 {
+                    gs.blocked.push(self.grid.is_blocked(TilePos { x, y }));
+                }
+            }
+        }
+        if let Some(vm) = self.world.storages.get_mut::<VisMirror>(Entity(2)) {
+            for (i, v) in self.vis.iter().enumerate() {
+                vm.words[i].words.clone_from(&v.words);
+            }
+        }
+    }
+
+    /// Fixed-tick step: sync mirrors -> canonical apply (failures are deterministic no-ops) ->
+    /// tick++ -> systems -> fold visibility mirror -> drain harvest deposits.
+    pub fn step(&mut self, cmds: &[(u32, Command)]) -> Result<(), SimError> {
+        self.sync_mirrors();
+        let mut sorted: Vec<(u32, &Command)> = cmds.iter().map(|(p, c)| (*p, c)).collect();
+        sorted.sort_by(|(p, a), (q, b)| p.cmp(q).then_with(|| a.sort_key().cmp(&b.sort_key())));
+        for (player, c) in sorted {
+            match *c {
+                Command::Move { unit, x, y } => {
+                    let _ = self.apply_move(unit, x, y);
+                }
+                Command::Attack { unit, target } => {
+                    let _ = self.apply_attack(unit, target);
+                }
+                Command::Stop { unit } => {
+                    let _ = self.apply_stop(unit);
+                }
+                Command::Build { building, x, y } => {
+                    let _ = self.build_at(player, building, x, y);
+                }
+                Command::Train {
+                    building,
+                    unit_kind,
+                } => {
+                    let _ = self.apply_train(building, unit_kind);
+                }
+                Command::Gather { unit, resource } => {
+                    let _ = self.apply_gather(unit, resource);
+                }
+                Command::Sacrifice { .. } | Command::Evolve { .. } | Command::AgeUp { .. } => {
+                    // Structure-only (docs/design-factions.md): no state change in this slice.
+                }
+            }
+        }
+        self.world.tick += 1;
+        let tick = self.world.tick;
+        self.scheduler.step(&mut self.world, tick);
+        // Fold fog mirrors back into the authoritative bitsets (systems cannot touch Sim fields).
+        if let Some(vm) = self.world.storages.get::<VisMirror>(Entity(2)).cloned() {
+            for (i, v) in vm.words.iter().enumerate() {
+                for (k, w) in v.words.iter().enumerate() {
+                    self.vis[i].words[k] |= *w;
+                }
+            }
+        }
+        // Drain harvest deposits (insertion order = entity order, stable across runs).
+        let deps = {
+            let d = self.world.storages.get_mut::<Deposits>(Entity(0)).unwrap();
+            std::mem::take(&mut d.0)
+        };
+        for (owner, slot, amount) in deps {
+            if (owner as usize) < self.players.len() {
+                self.players[owner as usize].stock.add(slot, amount as i64);
+            }
+        }
+        Ok(())
+    }
+
+    // ---- command application -------------------------------------------------
+
+    fn unit_tile(&self, unit: u32) -> Result<(i16, i16), SimError> {
+        let p = self
+            .world
+            .storages
+            .get::<Pos>(Entity(unit))
+            .ok_or(SimError::UnknownUnit)?;
+        Ok((tile_of(p.x), tile_of(p.y)))
+    }
+
+    fn apply_move(&mut self, unit: u32, x: i16, y: i16) -> Result<(), SimError> {
+        if !self.grid.contains(TilePos { x, y }) {
+            return Err(SimError::OutOfMap);
+        }
+        let (ux, uy) = self.unit_tile(unit)?;
+        match find_path(&self.grid, TilePos { x: ux, y: uy }, TilePos { x, y }) {
+            Some(path) => {
+                self.world
+                    .storages
+                    .add(Entity(unit), Order::Move { path, waypoint: 0 });
+                Ok(())
+            }
+            None => Err(SimError::PathUnreachable),
+        }
+    }
+
+    fn apply_attack(&mut self, unit: u32, target: u32) -> Result<(), SimError> {
+        if self.world.storages.get::<Unit>(Entity(unit)).is_none() {
+            return Err(SimError::UnknownUnit);
+        }
+        if self.world.storages.get::<Unit>(Entity(target)).is_none() {
+            return Err(SimError::UnknownUnit);
+        }
+        self.world
+            .storages
+            .add(Entity(unit), Order::Attack { target });
+        Ok(())
+    }
+
+    fn apply_stop(&mut self, unit: u32) -> Result<(), SimError> {
+        if self.world.storages.get::<Unit>(Entity(unit)).is_none() {
+            return Err(SimError::UnknownUnit);
+        }
+        self.world.storages.add(Entity(unit), Order::Idle);
+        self.world.storages.remove::<HarvestState>(Entity(unit));
+        self.world.storages.remove::<WorkJob>(Entity(unit));
+        Ok(())
+    }
+
+    /// Place a building on behalf of `owner`. Cost check is all-or-nothing; footprint must be
+    /// inside the map and not blocked (buildings do NOT overwrite existing structures — Occupied).
+    pub fn build_at(&mut self, owner: u32, kind: u16, x: i16, y: i16) -> Result<(), SimError> {
+        let spec = building_spec(kind);
+        let w = spec.w as i16;
+        let h = spec.h as i16;
+        if x < 0 || y < 0 || x + w > self.grid.w() as i16 || y + h > self.grid.h() as i16 {
+            return Err(SimError::OutOfMap);
+        }
+        for yy in y..y + h {
+            for xx in x..x + w {
+                if self.grid.is_blocked(TilePos { x: xx, y: yy }) {
+                    return Err(SimError::Occupied);
+                }
+            }
+        }
+        let stock = &mut self.players[owner as usize].stock;
+        if stock.get(1) < spec.wood
+            || stock.get(0) < spec.food
+            || stock.get(2) < spec.gold
+            || stock.get(3) < spec.mana
+        {
+            return Err(SimError::Unaffordable);
+        }
+        stock.take(1, spec.wood);
+        stock.take(0, spec.food);
+        stock.take(2, spec.gold);
+        stock.take(3, spec.mana);
+        let e = self.world.storages.spawn();
+        self.world.storages.add(
+            e,
+            Building {
+                owner,
+                kind,
+                status: BuildingStatus::Site,
+                hp: 1,
+                max_hp: spec.hp,
+                timer: spec.build_time,
+            },
+        );
+        let (cx, cy) = tile_center(x + w / 2, y + h / 2);
+        self.world.storages.add(e, Pos { x: cx, y: cy });
+        for yy in y..y + h {
+            for xx in x..x + w {
+                self.grid.set_blocked(TilePos { x: xx, y: yy }, true);
+            }
+        }
+        Ok(())
+    }
+
+    /// Queue a unit at a finished building. Building must be Done; cost checked all-or-nothing at
+    /// command time (no rollback rule from design-factions.md).
+    fn apply_train(&mut self, building: u32, unit_kind: u16) -> Result<(), SimError> {
+        let be = Entity(building);
+        let b = self
+            .world
+            .storages
+            .get::<Building>(be)
+            .ok_or(SimError::BadCommand)?;
+        if b.status != BuildingStatus::Done {
+            return Err(SimError::BadCommand);
+        }
+        if unit_kind > 2 {
+            return Err(SimError::BadCommand);
+        }
+        let spec = unit_spec(unit_kind);
+        let stock = &mut self.players[b.owner as usize].stock;
+        if stock.get(1) < spec.wood
+            || stock.get(0) < spec.food
+            || stock.get(2) < spec.gold
+            || stock.get(3) < spec.mana
+        {
+            return Err(SimError::Unaffordable);
+        }
+        stock.take(1, spec.wood);
+        stock.take(0, spec.food);
+        stock.take(2, spec.gold);
+        stock.take(3, spec.mana);
+        let mut q = self
+            .world
+            .storages
+            .get::<TrainQueue>(be)
+            .cloned()
+            .unwrap_or_default();
+        q.0.push(TrainItem {
+            kind: unit_kind,
+            ticks_left: spec.train_time,
+        });
+        self.world.storages.add(be, q);
+        Ok(())
+    }
+
+    /// Assign the nearest living node of `slot`: deterministic tie-break = lowest entity id (the
+    /// iteration is ascending, strict `<` keeps the first draw).
+    fn apply_gather(&mut self, unit: u32, resource: u8) -> Result<(), SimError> {
+        if resource > 3 {
+            return Err(SimError::BadCommand);
+        }
+        let (ux, uy) = self.unit_tile(unit)?;
+        let nodes: Vec<Entity> = self
+            .world
+            .storages
+            .iter::<ResourceNode>()
+            .filter_map(|(e, n)| {
+                if n.remaining > 0 && n.slot == resource {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut best: Option<(i32, Entity, i16, i16)> = None;
+        for e in nodes {
+            let (nx, ny) = match self.world.storages.get::<NodePos>(e) {
+                Some(np) => (np.x, np.y),
+                None => continue,
+            };
+            let d = manhattan(ux as i32 - nx as i32, uy as i32 - ny as i32);
+            if best.is_none() || d < best.as_ref().unwrap().0 {
+                best = Some((d, e, nx, ny));
+            }
+        }
+        let (_d, node, nx, ny) = best.ok_or(SimError::BadCommand)?;
+        match find_path(
+            &self.grid,
+            TilePos { x: ux, y: uy },
+            TilePos { x: nx, y: ny },
+        ) {
+            Some(path) => {
+                self.world
+                    .storages
+                    .add(Entity(unit), Order::Harvest { node: node.0, path });
+                self.world.storages.add(
+                    Entity(unit),
+                    HarvestState::ToNode {
+                        node: node.0,
+                        slot: resource,
+                    },
+                );
+                Ok(())
+            }
+            None => Err(SimError::PathUnreachable),
+        }
+    }
+
+    // ---- spawning --------------------------------------------------------------
+
+    pub fn spawn_unit_kind(&mut self, owner: u32, kind: u16, x: i16, y: i16) -> Entity {
+        let spec = unit_spec(kind);
+        let (cx, cy) = tile_center(x, y);
+        let e = self.world.storages.spawn();
+        self.world.storages.add(
+            e,
+            Unit {
+                owner: owner as u8,
+                kind,
+                hp: spec.hp as i32,
+                speed_q: spec.speed_q as u32,
+                dmg: spec.dmg as i32,
+                range: Fixed1616(spec.range_q),
+            },
+        );
+        self.world.storages.add(e, Pos { x: cx, y: cy });
+        self.world.storages.add(e, Order::Idle);
+        e
+    }
+
+    /// Legacy demo helper (client main.rs): spawn one Militia unit for `owner`.
+    pub fn spawn_unit(&mut self, owner: u32, x: i16, y: i16) -> u32 {
+        self.spawn_unit_kind(owner, 1, x, y).0
+    }
+
+    /// Town Center (Done) + 3 Serfs for each side at the canonical spawn points (14,14)/(113,113).
+    fn spawn_default_squads(&mut self) {
+        for (owner, px) in [(0u32, 14i16), (1u32, 113i16)] {
+            let spec = building_spec(0);
+            let e = self.world.storages.spawn();
+            self.world.storages.add(
+                e,
+                Building {
+                    owner,
+                    kind: 0,
+                    status: BuildingStatus::Done,
+                    hp: spec.hp,
+                    max_hp: spec.hp,
+                    timer: 0,
+                },
+            );
+            let (cx, cy) = tile_center(px + 1, px + 1);
+            self.world.storages.add(e, Pos { x: cx, y: cy });
+            for yy in px..px + 3 {
+                for xx in px..px + 3 {
+                    self.grid.set_blocked(TilePos { x: xx, y: yy }, true);
+                }
+            }
+            for i in 0..3 {
+                self.spawn_unit_kind(owner, 0, px + 4 + i, px + 2);
+            }
+        }
+    }
+
+    // ---- map generation ----------------------------------------------------------
+    // Strict SplitMix64 draw sequence from World::new(seed): identical map per seed.
+    fn generate_map(world: &mut World) -> Grid {
+        let mut grid = Grid::new(MAP_W, MAP_H);
+        for x in 0..MAP_W as i16 {
+            for b in 0..2i16 {
+                grid.set_blocked(TilePos { x, y: b }, true);
+                grid.set_blocked(
+                    TilePos {
+                        x,
+                        y: MAP_H as i16 - 1 - b,
+                    },
+                    true,
+                );
+            }
+        }
+        for y in 0..MAP_H as i16 {
+            for b in 0..2i16 {
+                grid.set_blocked(TilePos { x: b, y }, true);
+                grid.set_blocked(
+                    TilePos {
+                        x: MAP_W as i16 - 1 - b,
+                        y,
+                    },
+                    true,
+                );
+            }
+        }
+        for _ in 0..700 {
+            let v = world.rng.next_u64();
+            let x = 16 + (v % (MAP_W as u64 - 32)) as i16;
+            let y = 16 + ((v >> 16) % (MAP_H as u64 - 32)) as i16;
+            let kind = ((v >> 32) % 4) as u8;
+            if kind == 3 {
+                continue;
+            }
+            if manhattan(x as i32 - 14, y as i32 - 14) < 14
+                || manhattan(x as i32 - 113, y as i32 - 113) < 14
+            {
+                continue;
+            }
+            grid.set_blocked(TilePos { x, y }, true);
+        }
+        for i in 0..24u32 {
+            let v = world.rng.next_u64();
+            let slot = if i < 10 {
+                0u8
+            } else if i < 18 {
+                1u8
+            } else {
+                2u8
+            };
+            let total: i64 = if i < 10 {
+                2000 + (v % 1000) as i64
+            } else if i < 18 {
+                1500 + ((v >> 20) % 1000) as i64
+            } else {
+                500 + ((v >> 40) % 500) as i64
+            };
+            let x = 16 + (v % (MAP_W as u64 - 32)) as i16;
+            let y = 16 + ((v >> 16) % (MAP_H as u64 - 32)) as i16;
+            if grid.is_blocked(TilePos { x, y }) {
+                continue;
+            }
+            if manhattan(x as i32 - 14, y as i32 - 14) < 10
+                || manhattan(x as i32 - 113, y as i32 - 113) < 10
+            {
+                continue;
+            }
+            let e = world.storages.spawn();
+            world.storages.add(
+                e,
+                ResourceNode {
+                    slot,
+                    total,
+                    remaining: total,
+                },
+            );
+            world.storages.add(e, NodePos { x, y });
+        }
+        grid
+    }
+}
+
+// ===================== free functions (scheduler systems) =====================
+
+/// Construction: Site->UnderConstruction (timer 0), UnderConstruction->Done (timer 0).
+/// Completed Wonders bookkeep victory via the Building status only (victory_winner below).
+fn construction_system(world: &mut World, _tick: Tick) {
+    let ids: Vec<(Entity, Building)> = world
+        .storages
+        .iter::<Building>()
+        .map(|(e, b)| (e, *b))
+        .filter(|(_e, b)| {
+            (b.status == BuildingStatus::Site || b.status == BuildingStatus::UnderConstruction)
+                && b.timer > 0
+        })
+        .collect();
+    for (e, mut b) in ids {
+        b.timer -= 1;
+        if b.timer == 0 {
+            if b.status == BuildingStatus::Site {
+                b.status = BuildingStatus::UnderConstruction;
+                b.timer = building_spec(b.kind).build_time / 4;
+            } else {
+                b.status = BuildingStatus::Done;
+                b.hp = b.max_hp;
+            }
+        }
+        world.storages.add(e, b);
+    }
+}
+
+/// Training: one tick off the front slot per Done building with a queue.
+fn training_system(world: &mut World, _tick: Tick) {
+    let list: Vec<(Entity, Building, TrainQueue, Pos)> = world
+        .storages
+        .iter::<Building>()
+        .filter(|(_e, b)| b.status == BuildingStatus::Done)
+        .filter_map(|(e, b)| {
+            let q = world.storages.get::<TrainQueue>(e)?.clone();
+            if q.0.is_empty() {
+                return None;
+            }
+            let p = *world.storages.get::<Pos>(e)?;
+            Some((e, *b, q, p))
+        })
+        .collect();
+    for (e, _b, mut q, p) in list {
+        q.0[0].ticks_left -= 1;
+        if q.0[0].ticks_left == 0 {
+            let item = q.0.remove(0);
+            let bx = p.x.to_int_trunc() as i16;
+            let by = p.y.to_int_trunc() as i16;
+            spawn_unit_at(world, _b.owner, item.kind, bx + 1, by + 1);
+        }
+        world.storages.add(e, q);
+    }
+}
+
+/// Harvest state machine. Picking completes to Carrying; Carrying walks to the owner's Town
+/// Center and deposits (node decrement + deposit queue). ToNode walking is done by movement_system.
+fn harvest_system(world: &mut World, _tick: Tick) {
+    let units: Vec<(Entity, HarvestState)> = world
+        .storages
+        .iter::<HarvestState>()
+        .map(|(e, s)| (e, *s))
+        .collect();
+    let mut deposits: Vec<(u8, u8, i32)> = Vec::new();
+    let gs: Option<GridSide> = world.storages.get::<GridSide>(Entity(1)).cloned();
+    for (e, st) in units {
+        match st {
+            HarvestState::ToNode { node, slot } => {
+                if !node_alive(world, node) {
+                    world.storages.remove::<HarvestState>(e);
+                    world.storages.add(e, Order::Idle);
+                    continue;
+                }
+                if matches!(world.storages.get::<Order>(e), Some(Order::Idle)) {
+                    if let Some(np) = world.storages.get::<NodePos>(Entity(node)).cloned() {
+                        let (px, py) = match world.storages.get::<Pos>(e) {
+                            Some(pp) => (tile_of(pp.x), tile_of(pp.y)),
+                            None => continue,
+                        };
+                        if manhattan(px as i32 - np.x as i32, py as i32 - np.y as i32) <= 1 {
+                            world.storages.remove::<HarvestState>(e);
+                            world.storages.add(
+                                e,
+                                HarvestState::Picking {
+                                    node,
+                                    slot,
+                                    ticks_left: PICK_TICKS,
+                                },
+                            );
+                        } else {
+                            world.storages.add(e, HarvestState::ToNode { node, slot });
+                        }
+                    } else {
+                        world.storages.remove::<HarvestState>(e);
+                        world.storages.add(e, Order::Idle);
+                    }
+                } else {
+                    world.storages.add(e, HarvestState::ToNode { node, slot });
+                }
+            }
+            HarvestState::Picking {
+                node,
+                slot,
+                mut ticks_left,
+            } => {
+                if !node_alive(world, node) {
+                    world.storages.remove::<HarvestState>(e);
+                    world.storages.add(e, Order::Idle);
+                    continue;
+                }
+                ticks_left = ticks_left.saturating_sub(1);
+                if ticks_left == 0 {
+                    world.storages.add(
+                        e,
+                        HarvestState::Carrying {
+                            node,
+                            slot,
+                            amount: CARRY as i32,
+                        },
+                    );
+                } else {
+                    world.storages.add(
+                        e,
+                        HarvestState::Picking {
+                            node,
+                            slot,
+                            ticks_left,
+                        },
+                    );
+                }
+            }
+            HarvestState::Carrying { node, slot, amount } => {
+                let owner = match world.storages.get::<Unit>(e) {
+                    Some(u) => u.owner,
+                    None => continue,
+                };
+                if let Some((tx, ty)) = find_tc(world, owner as u32) {
+                    let (px, py) = match world.storages.get::<Pos>(e) {
+                        Some(p) => (tile_of(p.x), tile_of(p.y)),
+                        None => continue,
+                    };
+                    if manhattan((tx - px) as i32, (ty - py) as i32) <= 1 {
+                        let take = if let Some(n) = world.storages.get::<ResourceNode>(Entity(node))
+                        {
+                            (amount as i64).min(n.remaining.max(0)) as i32
+                        } else {
+                            0
+                        };
+                        if let Some(n) = world.storages.get_mut::<ResourceNode>(Entity(node)) {
+                            n.remaining -= take as i64;
+                        }
+                        if take > 0 {
+                            deposits.push((owner, slot, take));
+                        }
+                        world.storages.remove::<HarvestState>(e);
+                        world.storages.add(e, Order::Idle);
+                        continue;
+                    }
+                }
+                if let Some(gs) = &gs {
+                    let (px, py) = match world.storages.get::<Pos>(e) {
+                        Some(p) => (tile_of(p.x), tile_of(p.y)),
+                        None => continue,
+                    };
+                    if let Some((tx, ty)) = find_tc(world, owner as u32) {
+                        if let Some(path) = bfs_path(gs, px, py, tx, ty) {
+                            world.storages.add(e, Order::Move { path, waypoint: 0 });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !deposits.is_empty() {
+        if let Some(d) = world.storages.get_mut::<Deposits>(Entity(0)) {
+            d.0.extend(deposits);
         }
     }
 }
 
 #[inline]
-fn tile_center(t: i16) -> Fixed1616 {
-    Fixed1616::from_int(t as i32) + Fixed1616::from_rational(1, 2)
+fn node_alive(world: &World, node: u32) -> bool {
+    matches!(world.storages.get::<ResourceNode>(Entity(node)), Some(n) if n.remaining > 0)
 }
 
-pub struct Sim {
-    pub world: World,
-    pub grid: Grid,
-    scheduler: Scheduler,
+#[derive(Clone, Copy, Default)]
+struct Pt {
+    x: Fixed1616,
+    y: Fixed1616,
 }
 
-impl Sim {
-    pub fn new(seed: u64) -> Sim {
-        let mut sim = Sim {
-            world: World::new(seed),
-            grid: Grid::new(MAP_W, MAP_H),
-            scheduler: Scheduler::new(),
+impl Pt {
+    #[inline]
+    fn from_pos(p: &Pos) -> Pt {
+        Pt { x: p.x, y: p.y }
+    }
+    #[inline]
+    fn center(t: TilePos) -> Pt {
+        let (x, y) = tile_center(t.x, t.y);
+        Pt { x, y }
+    }
+}
+
+/// One fixed-point march step toward `goal`; true when inside `step` of goal.
+#[inline]
+fn march(p: &mut Pt, goal: Pt, step: i64) -> bool {
+    let step = Fixed1616(step);
+    let dx = goal.x.0 - p.x.0;
+    let dy = goal.y.0 - p.y.0;
+    let adx = dx.abs();
+    let ady = dy.abs();
+    if adx <= step.0 && ady <= step.0 {
+        p.x = goal.x;
+        p.y = goal.y;
+        return true;
+    }
+    if adx >= ady {
+        let n = if dx > 0 {
+            step.0.min(adx)
+        } else {
+            -step.0.min(adx)
         };
-        // Register systems in fixed deterministic order.
-        sim.scheduler.add_system("movement", movement_system);
-        sim.scheduler.add_system("combat", combat_system);
-        // Initialize storages explicitly (lazy creation is fine but be explicit here).
-        sim.world.storages.add_storage::<Unit>();
-        sim.world.storages.add_storage::<Pos>();
-        sim.world.storages.add_storage::<Order>();
-        sim
+        p.x.0 += n;
+    } else {
+        let n = if dy > 0 {
+            step.0.min(ady)
+        } else {
+            -step.0.min(ady)
+        };
+        p.y.0 += n;
     }
-
-    pub fn spawn_unit(&mut self, owner: u32, x: i16, y: i16) -> u32 {
-        let e = self.world.storages.spawn();
-        self.world.storages.add(
-            e,
-            Unit {
-                owner,
-                hp: 100,
-                speed_q: SPEED_SCALE / 2,
-                dmg: 10,
-                range: Fixed1616::ONE,
-            },
-        );
-        self.world.storages.add(
-            e,
-            Pos {
-                x: tile_center(x),
-                y: tile_center(y),
-            },
-        );
-        self.world.storages.add(e, Order::Idle);
-        e.0
-    }
-
-    /// Sort + apply commands, then advance one tick.
-    pub fn step(&mut self, cmds: &[(u32, Command)]) -> Result<(), SimError> {
-        let mut sorted: Vec<(u32, Command)> = cmds.to_vec();
-        sorted.sort_by(|(p, a), (q, b)| p.cmp(q).then_with(|| a.sort_key().cmp(&b.sort_key())));
-        for (_player, c) in sorted {
-            self.apply_command(c)?;
-        }
-        self.world.tick += 1;
-        let tick = self.world.tick;
-        self.scheduler.step(&mut self.world, tick);
-        Ok(())
-    }
-
-    fn apply_command(&mut self, cmd: Command) -> Result<(), SimError> {
-        match cmd {
-            Command::Move { unit, x, y } => {
-                let (sx, sy) = self.unit_tile(unit)?;
-                if !self.grid.contains(TilePos { x, y }) {
-                    return Err(SimError::OutOfMap);
-                }
-                match find_path(&self.grid, TilePos { x: sx, y: sy }, TilePos { x, y }) {
-                    Some(path) => {
-                        self.world
-                            .storages
-                            .add(Entity(unit), Order::Move { path, waypoint: 0 });
-                        Ok(())
-                    }
-                    None => Err(SimError::PathUnreachable),
-                }
-            }
-            Command::Attack { unit, target } => {
-                let _ = self.unit_tile(unit)?;
-                if self.world.storages.get::<Unit>(Entity(target)).is_none() {
-                    return Err(SimError::UnknownUnit);
-                }
-                self.world
-                    .storages
-                    .add(Entity(unit), Order::Attack { target });
-                Ok(())
-            }
-            Command::Stop { unit } => {
-                let _ = self.unit_tile(unit)?;
-                self.world.storages.add(Entity(unit), Order::Idle);
-                Ok(())
-            }
-        }
-    }
-
-    fn unit_tile(&self, id: u32) -> Result<(i16, i16), SimError> {
-        let p = self
-            .world
-            .storages
-            .get::<Pos>(Entity(id))
-            .ok_or(SimError::UnknownUnit)?;
-        Ok((p.x.to_int_trunc() as i16, p.y.to_int_trunc() as i16))
-    }
-
-    /// Canonical state hash — iteration strictly by entity index (ECS iter).
-    pub fn hash(&self) -> u64 {
-        let mut h = Hasher::new();
-        h.u32(SIM_VERSION);
-        h.u64(self.world.tick);
-        h.u64(self.world.rng.state());
-        h.u32(self.grid.w() as u32);
-        h.u32(self.grid.h() as u32);
-        h.u32(self.grid.blocked_count() as u32);
-        for (e, u) in self.world.storages.iter::<Unit>() {
-            let p = self.world.storages.get::<Pos>(e).unwrap();
-            let o = self.world.storages.get::<Order>(e).unwrap();
-            h.u32(e.0);
-            h.u32(u.owner);
-            h.u32(u.hp);
-            h.u32(u.speed_q as u32);
-            h.u32(u.dmg);
-            h.u64(u.range.inner() as u64);
-            h.u64(p.x.inner() as u64);
-            h.u64(p.y.inner() as u64);
-            o.hash_into(&mut h);
-        }
-        h.finish()
-    }
-
-    pub fn alive_units(&self) -> u32 {
-        self.world.storages.iter::<Unit>().count() as u32
-    }
+    false
 }
 
-/// Movement system: advance along Move path one step (speed_q) along the dominant axis.
 fn movement_system(world: &mut World, _tick: Tick) {
-    let ids: Vec<Entity> = world.storages.iter::<Unit>().map(|(e, _)| e).collect();
-    for e in ids {
-        let order = match world.storages.get::<Order>(e) {
-            Some(Order::Move { .. }) => world.storages.get::<Order>(e).unwrap().clone(),
-            _ => continue,
-        };
-        if let Order::Move { path, waypoint } = order {
-            if waypoint as usize >= path.len() {
-                world.storages.add(e, Order::Idle);
-                continue;
-            }
-            let t = path[waypoint as usize];
-            let cx = tile_center(t.x);
-            let cy = tile_center(t.y);
-            let speed_q = world.storages.get::<Unit>(e).unwrap().speed_q;
-            let step = Fixed1616::from_rational(speed_q as i64, SPEED_SCALE as i64);
-            let p = *world.storages.get::<Pos>(e).unwrap();
-            let dx = cx - p.x;
-            let dy = cy - p.y;
-            let adx = dx.wrapping_abs();
-            let ady = dy.wrapping_abs();
-            let half = Fixed1616::from_rational(1, 2);
-            if (adx + ady) <= half {
-                // arrived at waypoint
-                world.storages.add(e, Pos { x: cx, y: cy });
-                if (waypoint + 1) as usize >= path.len() {
-                    world.storages.add(e, Order::Idle);
-                } else {
-                    world.storages.add(
-                        e,
-                        Order::Move {
-                            path: path.clone(),
-                            waypoint: waypoint + 1,
-                        },
-                    );
-                }
-            } else if adx >= ady && !dx.is_zero() {
-                world.storages.add(
-                    e,
-                    Pos {
-                        x: p.x + if dx.inner() > 0 { step } else { -step },
-                        y: p.y,
-                    },
-                );
-            } else if !dy.is_zero() {
-                world.storages.add(
-                    e,
-                    Pos {
-                        x: p.x,
-                        y: p.y + if dy.inner() > 0 { step } else { -step },
-                    },
-                );
-            } else {
-                world.storages.add(
-                    e,
-                    Pos {
-                        x: p.x + step,
-                        y: p.y,
-                    },
-                );
-            }
+    let units: Vec<(Entity, u32)> = world
+        .storages
+        .iter::<Unit>()
+        .map(|(e, u)| (e, u.speed_q))
+        .collect();
+    for (e, speed_q) in units {
+        if speed_q == 0 {
+            continue;
         }
-    }
-}
-
-/// Combat system: Attack order fires when target within range (center distance). Damage applied
-/// in ascending attacker entity order; dead units removed after the damage pass.
-fn combat_system(world: &mut World, _tick: Tick) {
-    let ids: Vec<Entity> = world.storages.iter::<Unit>().map(|(e, _)| e).collect();
-    let mut hits: Vec<(Entity, Entity, u32)> = Vec::new();
-    for e in ids {
-        let u = *world.storages.get::<Unit>(e).unwrap();
+        let step = Fixed1616::from_rational(speed_q as i64, SPEED_SCALE).0;
+        let mut p = match world.storages.get::<Pos>(e) {
+            Some(p) => Pt::from_pos(p),
+            None => continue,
+        };
         let order = match world.storages.get::<Order>(e) {
             Some(o) => o.clone(),
             None => continue,
         };
-        if let Order::Attack { target } = order {
-            let te = Entity(target);
-            if world.storages.get::<Unit>(te).is_none() {
-                world.storages.add(e, Order::Idle);
-                continue;
+        match order {
+            Order::Move { path, waypoint } => {
+                if waypoint >= path.len() {
+                    world.storages.add(e, Order::Idle);
+                    continue;
+                }
+                let goal = Pt::center(path[waypoint]);
+                let arrived = march(&mut p, goal, step);
+                let wp = if arrived { waypoint + 1 } else { waypoint };
+                world.storages.add(e, Pos { x: p.x, y: p.y });
+                if wp >= path.len() {
+                    world.storages.add(e, Order::Idle);
+                } else {
+                    world.storages.add(e, Order::Move { path, waypoint: wp });
+                }
             }
-            let ap = world.storages.get::<Pos>(e).unwrap();
-            let tp = world.storages.get::<Pos>(te).unwrap();
-            let dx = ap.x - tp.x;
-            let dy = ap.y - tp.y;
-            let dist2 = dx.wrapping_mul(dx) + dy.wrapping_mul(dy);
-            let r2 = u.range.wrapping_mul(u.range);
-            if dist2 <= r2 {
-                hits.push((e, te, u.dmg));
+            Order::Harvest { node, mut path } => {
+                if path.is_empty() {
+                    world.storages.add(
+                        e,
+                        HarvestState::Picking {
+                            node,
+                            slot: 0,
+                            ticks_left: PICK_TICKS,
+                        },
+                    );
+                    world.storages.add(e, Order::Idle);
+                } else {
+                    let goal = Pt::center(path[0]);
+                    let arrived = march(&mut p, goal, step);
+                    world.storages.add(e, Pos { x: p.x, y: p.y });
+                    if arrived {
+                        path.remove(0);
+                    }
+                    world.storages.add(e, Order::Harvest { node, path });
+                }
             }
+            Order::Construct { building, mut path } => {
+                if path.is_empty() {
+                    world.storages.add(e, Order::Idle);
+                    world.storages.add(
+                        e,
+                        WorkJob {
+                            building,
+                            node: 0,
+                            slot: 0,
+                            mode: WorkMode::Build,
+                        },
+                    );
+                } else {
+                    let goal = Pt::center(path[0]);
+                    let arrived = march(&mut p, goal, step);
+                    world.storages.add(e, Pos { x: p.x, y: p.y });
+                    if arrived {
+                        path.remove(0);
+                    }
+                    world.storages.add(e, Order::Construct { building, path });
+                }
+            }
+            Order::Idle | Order::Attack { .. } => {}
         }
     }
-    for (_att, tgt, dmg) in hits {
-        if let Some(u) = world.storages.get_mut::<Unit>(tgt) {
-            u.hp = u.hp.saturating_sub(dmg);
-        }
-    }
-    let dead: Vec<Entity> = world
+}
+
+// ===================== visibility + fog =====================
+
+/// Each living unit reveals a SIGHT_BASE-radius diamond around its tile into the owner's fog
+/// mirror (Entity(2)). Fog is IN the state hash (design-factions.md: lead decision).
+fn visibility_system(world: &mut World, _tick: Tick) {
+    let units: Vec<(Entity, u32, i16, i16)> = world
         .storages
         .iter::<Unit>()
-        .filter(|(_, u)| u.hp == 0)
-        .map(|(e, _)| e)
+        .filter_map(|(e, u)| {
+            let p = world.storages.get::<Pos>(e)?;
+            Some((e, u.owner as u32, tile_of(p.x), tile_of(p.y)))
+        })
         .collect();
+    let vm = match world.storages.get_mut::<VisMirror>(Entity(2)) {
+        Some(vm) => vm,
+        None => return,
+    };
+    for (_e, owner, x, y) in units {
+        if owner >= 2 {
+            continue;
+        }
+        let w = &mut vm.words[owner as usize];
+        for dy in -SIGHT_BASE..=SIGHT_BASE {
+            for dx in -SIGHT_BASE..=SIGHT_BASE {
+                if manhattan(dx, dy) <= SIGHT_BASE {
+                    w.set(x + dx as i16, y + dy as i16);
+                }
+            }
+        }
+    }
+}
+
+// ===================== combat =====================
+
+/// Attack orders resolve in ascending entity order: attacker hits target if center distance is
+/// within range (fixed-point squared compare). Deaths despawn after the pass (ascending order).
+fn combat_system(world: &mut World, _tick: Tick) {
+    let attackers: Vec<(Entity, u32, i32, Fixed1616, Pt)> = world
+        .storages
+        .iter::<Order>()
+        .filter_map(|(e, o)| match o {
+            Order::Attack { target } => {
+                let u = world.storages.get::<Unit>(e)?;
+                let p = world.storages.get::<Pos>(e)?;
+                Some((e, *target, u.dmg, u.range, Pt::from_pos(p)))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut dead: Vec<Entity> = Vec::new();
+    for (e, target, dmg, range, from) in attackers {
+        if dead.contains(&e) {
+            continue;
+        }
+        if world.storages.get::<Unit>(Entity(target)).is_none() {
+            continue;
+        }
+        let tp = match world.storages.get::<Pos>(Entity(target)) {
+            Some(p) => *p,
+            None => continue,
+        };
+        let dx = tp.x.0 - from.x.0;
+        let dy = tp.y.0 - from.y.0;
+        let r = range.0;
+        if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) <= r.wrapping_mul(r) {
+            if let Some(tu) = world.storages.get_mut::<Unit>(Entity(target)) {
+                tu.hp = tu.hp.saturating_sub(dmg);
+                if tu.hp <= 0 {
+                    dead.push(Entity(target));
+                }
+            }
+        }
+    }
+    dead.sort();
+    dead.dedup();
     for e in dead {
         world.storages.remove::<Unit>(e);
         world.storages.remove::<Pos>(e);
         world.storages.remove::<Order>(e);
+        world.storages.remove::<HarvestState>(e);
+        world.storages.remove::<WorkJob>(e);
         world.storages.despawn(e);
     }
 }
 
-/// Run a full deterministic sim: apply per-tick command batches (missing batch = empty),
-/// then return the final state hash.
-pub fn run_sim(seed: u64, ticks: u64, cmds: &[shared::TickCommands]) -> u64 {
-    let mut sim = Sim::new(seed);
-    // Spawn a small default squad to make runs meaningful even without spawn commands.
-    for i in 0..3u32 {
-        sim.spawn_unit(0, (1 + 2 * i) as i16, 1);
+// ===================== helper fns =====================
+
+fn spawn_unit_at(world: &mut World, owner: u32, kind: u16, x: i16, y: i16) {
+    let spec = unit_spec(kind);
+    let (cx, cy) = tile_center(x, y);
+    let e = world.storages.spawn();
+    world.storages.add(
+        e,
+        Unit {
+            owner: owner as u8,
+            kind,
+            hp: spec.hp as i32,
+            speed_q: spec.speed_q as u32,
+            dmg: spec.dmg as i32,
+            range: Fixed1616(spec.range_q),
+        },
+    );
+    world.storages.add(e, Pos { x: cx, y: cy });
+    world.storages.add(e, Order::Idle);
+}
+
+fn find_tc(world: &World, owner: u32) -> Option<(i16, i16)> {
+    for (e, b) in world.storages.iter::<Building>() {
+        if b.owner == owner && b.kind == 0 && b.status == BuildingStatus::Done {
+            if let Some(p) = world.storages.get::<Pos>(e) {
+                return Some((tile_of(p.x), tile_of(p.y)));
+            }
+        }
     }
+    None
+}
+
+/// Deterministic 4-connected BFS over the GridSide mirror (same neighbor order as engine-path:
+/// N,E,S,W). Returns the tile path excluding the start tile.
+fn bfs_path(gs: &GridSide, sx: i16, sy: i16, gx: i16, gy: i16) -> Option<Vec<TilePos>> {
+    const NEIGH: [(i16, i16); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+    if sx == gx && sy == gy {
+        return Some(Vec::new());
+    }
+    if gs_is_blocked(gs, gx, gy) {
+        return None;
+    }
+    let w = gs.w as usize;
+    let h = gs.h as usize;
+    if sx < 0
+        || sy < 0
+        || gx < 0
+        || gy < 0
+        || sx as usize >= w
+        || sy as usize >= h
+        || gx as usize >= w
+        || gy as usize >= h
+    {
+        return None;
+    }
+    let mut prev: Vec<Option<usize>> = vec![None; w * h];
+    let mut queue: Vec<usize> = Vec::new();
+    queue.push(sy as usize * w + sx as usize);
+    let goal = gy as usize * w + gx as usize;
+    let mut head = 0;
+    while head < queue.len() {
+        let cur = queue[head];
+        head += 1;
+        if cur == goal {
+            break;
+        }
+        let cx = (cur % w) as i16;
+        let cy = (cur / w) as i16;
+        for (dx, dy) in NEIGH {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            if nx < 0 || ny < 0 || nx >= gs.w as i16 || ny >= gs.h as i16 {
+                continue;
+            }
+            let idx = ny as usize * w + nx as usize;
+            if prev[idx].is_some() || gs_is_blocked(gs, nx, ny) {
+                continue;
+            }
+            prev[idx] = Some(cur);
+            queue.push(idx);
+        }
+    }
+    // None when goal unreachable (never overwritten in prev); walk-back below would loop, so bail.
+    prev[goal]?;
+    let mut path = Vec::new();
+    let mut cur = goal;
+    while cur != sy as usize * w + sx as usize {
+        path.push(TilePos {
+            x: (cur % w) as i16,
+            y: (cur / w) as i16,
+        });
+        cur = prev[cur]?;
+    }
+    path.reverse();
+    Some(path)
+}
+
+// ===================== canonical state hash + demo helpers =====================
+
+impl Sim {
+    /// Canonical state hash. SIM_VERSION is owned by lib.rs; field order is the golden contract.
+    pub fn hash(&self) -> u64 {
+        let mut h = Hasher::new();
+        h.write_u32(SIM_VERSION);
+        h.write_u64(self.world.tick);
+        h.write_u64(self.world.rng.state());
+        h.write_u32(self.grid.w() as u32);
+        h.write_u32(self.grid.h() as u32);
+        h.write_u32(self.grid.blocked_count() as u32);
+        for pl in &self.players {
+            h.write_i64(pl.stock.food);
+            h.write_i64(pl.stock.wood);
+            h.write_i64(pl.stock.gold);
+            h.write_i64(pl.stock.mana);
+            h.write_u32(pl.age as u32);
+            h.write_u32(pl.wonder);
+            h.write_u64(pl.wonder_started);
+        }
+        for v in &self.vis {
+            v.hash_into(&mut h);
+        }
+        let mut bs: Vec<(Entity, &Building)> = self.world.storages.iter::<Building>().collect();
+        bs.sort_by_key(|(e, _)| e.0);
+        for (e, b) in &bs {
+            h.write_u32(e.0);
+            h.write_u32(b.owner);
+            h.write_u16(b.kind);
+            h.write_u8(b.status.code());
+            h.write_u32(b.hp);
+            h.write_u32(b.max_hp);
+            h.write_u32(b.timer);
+            if let Some(pp) = self.world.storages.get::<Pos>(*e) {
+                h.write_i32(pp.x.to_int_trunc());
+                h.write_i32(pp.y.to_int_trunc());
+            }
+            if let Some(q) = self.world.storages.get::<TrainQueue>(*e) {
+                h.write_u64(q.0.len() as u64);
+                for it in &q.0 {
+                    h.write_u16(it.kind);
+                    h.write_u32(it.ticks_left);
+                }
+            }
+        }
+        let mut ns: Vec<(Entity, &ResourceNode)> =
+            self.world.storages.iter::<ResourceNode>().collect();
+        ns.sort_by_key(|(e, _)| e.0);
+        for (e, n) in &ns {
+            h.write_u32(e.0);
+            n.hash_into(&mut h);
+            if let Some(np) = self.world.storages.get::<NodePos>(*e) {
+                np.hash_into(&mut h);
+            }
+        }
+        let mut us: Vec<(Entity, &Unit)> = self.world.storages.iter::<Unit>().collect();
+        us.sort_by_key(|(e, _)| e.0);
+        for (e, u) in &us {
+            h.write_u32(e.0);
+            h.write_u8(u.owner);
+            h.write_u16(u.kind);
+            h.write_i32(u.hp);
+            h.write_u32(u.speed_q);
+            h.write_i32(u.dmg);
+            h.write_i64(u.range.inner());
+            if let Some(pp) = self.world.storages.get::<Pos>(*e) {
+                h.write_i32(pp.x.to_int_trunc());
+                h.write_i32(pp.y.to_int_trunc());
+            }
+            if let Some(o) = self.world.storages.get::<Order>(*e) {
+                o.hash_into(&mut h);
+            }
+            if let Some(s) = self.world.storages.get::<HarvestState>(*e) {
+                s.hash_into(&mut h);
+            }
+            if let Some(w) = self.world.storages.get::<WorkJob>(*e) {
+                w.hash_into(&mut h);
+            }
+        }
+        h.finish()
+    }
+}
+
+/// Spawn three units for `owner` (determinism-test fixture; the economy map is seeded).
+pub fn spawn_demo_units(sim: &mut Sim, owner: u32) {
+    sim.spawn_unit_kind(owner, 1, 18, 16);
+    sim.spawn_unit_kind(owner, 1, 19, 16);
+    sim.spawn_unit_kind(owner, 1, 20, 16);
+}
+
+/// Replay a command log; `cmds[t]` is the (unordered) batch for tick t (step canonicalizes).
+pub fn run_sim(seed: u64, ticks: u64, cmds: &[TickCommands]) -> u64 {
+    let mut sim = Sim::new(seed);
     for t in 0..ticks {
-        let batch = cmds
-            .iter()
-            .find(|c| c.tick == t)
-            .map(|c| c.cmds.clone())
+        let batch: Vec<(u32, Command)> = cmds
+            .get(t as usize)
+            .map(|tc| tc.cmds.clone())
             .unwrap_or_default();
         let _ = sim.step(&batch);
     }
-    state_hash(&sim)
-}
-
-pub fn state_hash(sim: &Sim) -> u64 {
     sim.hash()
 }

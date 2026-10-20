@@ -14,7 +14,7 @@ fn main() {
         .unwrap_or(30);
 
     let mut sim = Sim::new(1);
-    let u1 = sim.spawn_unit(0, 5, 5);
+    let u1 = 3u32; // first Serf of player 0 spawned by Sim::new (entity id after side storages + TCs)
     let _u2 = sim.spawn_unit(1, 30, 30);
     let mut r = MockRenderer::new();
     let ev: [shared::SimEvent; 0] = [];

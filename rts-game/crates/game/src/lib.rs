@@ -6,12 +6,13 @@
 //!
 //! SIM_VERSION: bump deliberately whenever sim math changes; golden hash depends on it.
 
+pub mod economy;
 pub mod sim;
 
-pub use sim::{run_sim, state_hash, Sim, SimError};
+pub use sim::{run_sim, Sim, SimError};
 
 /// Bump deliberately on intentional sim-math changes.
-pub const SIM_VERSION: u32 = 1;
+pub const SIM_VERSION: u32 = 2;
 /// Fixed tick rate. The host (server/client) owns the clock; the sim only advances ticks.
 pub const TICK_HZ: u64 = 30;
 
