@@ -1,0 +1,10 @@
+# Cargo settings for iron-sim rimworld-game.
+# Keep determinism guarantees; do not change profile settings casually (they change codegen,
+# not behavior, but keep releases reproducible).
+[build]
+target-dir = "target"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

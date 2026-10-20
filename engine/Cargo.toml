@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/core", "crates/ecs", "crates/path", "crates/sim"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Keep the public surface in rts-game/docs/engine-api.md stable; internals may evolve.
+
+# Workspace-wide lint gates enforcing the determinism contract (see AGENTS.md).
+# NOTE: `floating_point_patterns` / `float_arithmetic` / `float_cmp` / `iter_over_hashmap`
+# are UNSTABLE clippy lints on stable 1.99 — declaring them here errors (unknown lint),
+# so the authoritative float/hash ban is the grep gate in the Makefile/justfile `lint`
+# target (no `f32`/`f64` tokens, no `HashMap` import/usage) — AGENTS.md rules 1 and 2.
+[workspace.lints.clippy]
+correctness = "deny"
+complexity = "deny"
+perf = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.dependencies]
+engine-core = { path = "crates/core" }
+engine-ecs = { path = "crates/ecs" }
+engine-path = { path = "crates/path" }
+engine-sim = { path = "crates/sim" }

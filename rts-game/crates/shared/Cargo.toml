@@ -1,0 +1,9 @@
+[package]
+name = "shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fnv.workspace = true
+engine-core.workspace = true

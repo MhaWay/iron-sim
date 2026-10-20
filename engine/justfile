@@ -1,0 +1,23 @@
+# justfile - CI-friendly shortcuts (works alongside Makefile).
+set shell := ["bash", "-c"]
+
+default: check
+
+build:
+    source /root/.cargo/env && cargo build --workspace
+
+test:
+    source /root/.cargo/env && cargo test --workspace
+
+fmt:
+    source /root/.cargo/env && cargo fmt --all
+
+clippy:
+    source /root/.cargo/env && cargo clippy --workspace --all-targets -- -D warnings
+
+lint: fmt clippy
+
+check: lint test
+
+clean:
+    source /root/.cargo/env && cargo clean

@@ -1,0 +1,10 @@
+[package]
+name = "sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+engine-core = { workspace = true }
+engine-ecs = { workspace = true }
+engine-path = { workspace = true }
+shared = { path = "../shared" }

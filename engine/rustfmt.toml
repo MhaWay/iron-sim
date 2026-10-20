@@ -1,0 +1,10 @@
+# Formatting contract. Keep these stable so CI diffs stay clean.
+edition = "2021"
+max_width = 120
+hard_tabs = false
+tab_spaces = 4
+use_small_heuristics = "Default"
+
+# Determinism guardrails: never format in ways that hide ordering choices.
+reorder_imports = true
+reorder_modules = true

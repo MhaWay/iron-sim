@@ -1,0 +1,4 @@
+# Clippy config for the engine workspace.
+# The real float/hash bans live in workspace lints (Cargo.toml [workspace.lints.clippy]);
+# this file only tweaks thresholds.
+msrv = "1.99"

@@ -1,0 +1,12 @@
+[package]
+name = "engine-ecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Iron-sim deterministic ECS + system scheduler."
+
+[dependencies]
+engine-core = { path = "../core" }
+
+[lints]
+workspace = true

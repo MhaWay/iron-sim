@@ -1,0 +1,12 @@
+[package]
+name = "engine-path"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Iron-sim deterministic grid pathfinding (A*)."
+
+[dependencies]
+engine-core = { path = "../core" }
+
+[lints]
+workspace = true

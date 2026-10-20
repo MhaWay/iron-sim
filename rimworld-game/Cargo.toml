@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/shared", "crates/sim", "crates/server", "crates/client"]
+
+[workspace.dependencies]
+engine-core = { path = "../engine/crates/core" }
+engine-ecs = { path = "../engine/crates/ecs" }
+engine-path = { path = "../engine/crates/path" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

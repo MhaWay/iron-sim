@@ -1,0 +1,20 @@
+# Build artifacts
+/target
+debug/
+release/
+
+# Rust/Cargo
+Cargo.lock.bak
+*.pdb
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Generated data / recordings
+artifacts/
+*.replay
+*.sav
+coverage/

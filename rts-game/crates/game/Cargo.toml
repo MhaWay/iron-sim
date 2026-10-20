@@ -1,0 +1,12 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+fnv.workspace = true
+engine-core.workspace = true
+engine-ecs.workspace = true
+engine-path.workspace = true

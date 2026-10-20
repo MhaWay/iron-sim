@@ -1,0 +1,11 @@
+# Workspace build config.
+# Keep builds reproducible & local: dedicated target dir per repo (shared target dirs across
+# sibling repos can mix feature flags), conservative defaults. Sim determinism NEVER depends on
+# build settings — but keeping them identical avoids "works locally, desync on CI" surprises.
+[build]
+target-dir = "target"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
