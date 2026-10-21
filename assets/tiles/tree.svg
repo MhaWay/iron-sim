@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect width="32" height="32" fill="#3f7d34"/>
+  <rect x="14" y="22" width="4" height="9" fill="#5a4632"/>               <!-- trunk -->
+  <circle cx="16" cy="16" r="11" fill="#2e7d32"/>
+  <circle cx="11" cy="13" r="6" fill="#439346"/>                          <!-- canopy highlight -->
+  <circle cx="16" cy="9" r="5" fill="#2e7d32"/>
+  <path d="M16 5 l2 4 h-4 z" fill="#439346"/>
+  <path d="M10 22 q6 3 12 0" stroke="#5a4632" stroke-width="1" fill="none"/>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Chitin Swarm drone: chitinous green with translucent wings -->
+  <path d="M32 12 q10 6 8 20 q-8 8 -16 0 q-2 -14 8 -20 z" fill="#2e7d32"/> <!-- abdomen -->
+  <ellipse cx="32" cy="14" rx="8" ry="6" fill="#a5d6a7"/>                  <!-- thorax -->
+  <path d="M26 16 C 8 6, 4 16, 14 20 C 10 26, 22 24, 26 18 Z" fill="#b2fead" opacity="0.75"/> <!-- L wing -->
+  <path d="M38 16 C 56 6, 60 16, 50 20 C 54 26, 42 24, 38 18 Z" fill="#b2fead" opacity="0.75"/> <!-- R wing -->
+  <line x1="32" y1="40" x2="32" y2="54" stroke="#2e7d32" stroke-width="6"/>   <!-- stinger -->
+  <path d="M32 54 l-4 6 h8 z" fill="#a5d6a7"/>                              <!-- barb -->
+  <line x1="28" y1="30" x2="16" y2="40" stroke="#1b4d1b" stroke-width="2"/> <!-- legs -->
+  <line x1="32" y1="32" x2="32" y2="44" stroke="#1b4d1b" stroke-width="2"/>
+  <line x1="36" y1="30" x2="48" y2="40" stroke="#1b4d1b" stroke-width="2"/>
+  <circle cx="29" cy="15" r="2" fill="#7fff00"/>                            <!-- eyes -->
+  <circle cx="35" cy="15" r="2" fill="#7fff00"/>
+  <path d="M28 20 q-6 4 -8 10" stroke="#7fff00" stroke-width="1.5" fill="none"/>
+  <path d="M36 20 q6 4 8 10" stroke="#7fff00" stroke-width="1.5" fill="none"/>
+</svg>

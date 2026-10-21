@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Kingdom of Aldren soldier: steel plate + gold trim -->
+  <path d="M24 8 h16 v6 h-16 z" fill="#c9a227"/>            <!-- helm crest -->
+  <rect x="24" y="12" width="16" height="10" fill="#8d99ae"/> <!-- helm -->
+  <rect x="28" y="16" width="8" height="6" fill="#1f2328"/>  <!-- visor -->
+  <path d="M20 24 h24 v26 h-24 z" fill="#9adeff"/>          <!-- surcoat -->
+  <path d="M20 24 h24 v6 h-24 z" fill="#c9a227"/>
+  <path d="M32 30 v18" stroke="#c9a227" stroke-width="2"/>
+  <rect x="12" y="24" width="8" height="16" fill="#8d99ae"/>  <!-- shield arm -->
+  <circle cx="16" cy="32" r="6" fill="#c9a227"/>             <!-- shield -->
+  <rect x="44" y="18" width="4" height="30" fill="#8d99ae"/> <!-- spear shaft -->
+  <path d="M46 14 l-3 6 h6 z" fill="#c9a227"/>               <!-- spear head -->
+  <rect x="25" y="50" width="6" height="12" fill="#4a525f"/>
+  <rect x="33" y="50" width="6" height="12" fill="#4a525f"/>
+</svg>
