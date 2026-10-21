@@ -10,19 +10,31 @@ use engine_path::{find_path, Grid, TilePos};
 use shared::{Command, Hasher, TickCommands, WriteHash};
 
 use crate::economy::{
-    building_spec, unit_spec, Building, BuildingStatus, HarvestState, NodePos, PlayerState,
-    ResourceNode, TrainItem, TrainQueue, Visibility, WorkJob, WorkMode, CARRY, MAP_H, MAP_W,
-    PICK_TICKS, SIGHT_BASE,
+    building_spec, harvest_score_inc, pop_cap_for, train_gate, unit_spec, Building, BuildingStatus,
+    HarvestState, NodePos, PlayerState, RallyPoint, ResourceNode, TrainItem, TrainQueue, UnitRally,
+    Visibility, WorkJob, WorkMode, AGE_COST, AGE_UP_TICKS, CARRY, MAP_H, MAP_W, MATCH_TICKS,
+    PICK_TICKS, SIGHT_BASE, UNIT_KIND_COUNT,
 };
 use crate::SIM_VERSION;
 
 pub const SPEED_SCALE: i64 = 1024;
+/// Deposits slot used for training score credits (255 = impossible resource slot, collision-free).
+const TRAIN_SCORE_MARKER: u8 = 255;
+/// Deposits slot used for building-completion score credits.
+const BUILD_SCORE_MARKER: u8 = 254;
+/// Deposits owner used for wrecked-building footprint reopen (owner sentinel).
+const REOPEN_OWNER: u8 = 255;
+/// Deposits slot used for wrecked-building footprint reopen.
+const REOPEN_MARKER: u8 = 252;
 pub const MAX_PLAYERS: usize = 2;
 /// Wonder must be held for this many ticks to win (15 min at 30 Hz).
 pub const VICTORY_WONDER_HOLD: u64 = 30 * 30 * 60;
-/// Civics-point thresholds (docs/design-factions.md Golden Age gate) — data only; AgeUp is
-/// structure-only in this slice, so the table is unreferenced except for documentation.
-const _AGE_THRESHOLDS: [u32; 4] = [0, 300, 700, 1200];
+/// Age-gated training is enforced via economy::train_gate (building kind + minimum age); the
+/// old civic-point threshold table is superseded by the v2 cost/timer table (economy::AGE_COST).
+/// Wall damage applied per hit to buildings (combat_system).
+pub const WALL_BUILDING_DMG: i32 = 15;
+/// Building melee reach (1 tile, fixed-point) used when units attack structures.
+const BUILDING_ATTACK_RANGE: i64 = 98_304;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimError {
@@ -53,10 +65,25 @@ pub struct Pos {
 #[derive(Clone, Debug)]
 pub enum Order {
     Idle,
-    Move { path: Vec<TilePos>, waypoint: usize },
-    Attack { target: u32 },
-    Harvest { node: u32, path: Vec<TilePos> },
-    Construct { building: u32, path: Vec<TilePos> },
+    Move {
+        path: Vec<TilePos>,
+        waypoint: usize,
+    },
+    Attack {
+        target: u32,
+    },
+    /// v2: attack-and-chase (melee) — movement walks the unit toward the target while idle.
+    UnitAttack {
+        target: u32,
+    },
+    Harvest {
+        node: u32,
+        path: Vec<TilePos>,
+    },
+    Construct {
+        building: u32,
+        path: Vec<TilePos>,
+    },
 }
 
 #[inline]
@@ -96,6 +123,10 @@ impl Order {
             }
             Order::Attack { target } => {
                 h.write_u8(2);
+                h.write_u32(*target);
+            }
+            Order::UnitAttack { target } => {
+                h.write_u8(5);
                 h.write_u32(*target);
             }
             Order::Harvest { node, path } => {
@@ -248,8 +279,17 @@ impl Sim {
                 Command::Gather { unit, resource } => {
                     let _ = self.apply_gather(unit, resource);
                 }
-                Command::Sacrifice { .. } | Command::Evolve { .. } | Command::AgeUp { .. } => {
+                Command::Sacrifice { .. } | Command::Evolve { .. } => {
                     // Structure-only (docs/design-factions.md): no state change in this slice.
+                }
+                Command::AgeUp { age } => {
+                    let _ = self.apply_age_up(player, age);
+                }
+                Command::RallyPoint { building, tx, ty } => {
+                    let _ = self.apply_rally_point(player, building, tx, ty);
+                }
+                Command::Rally { unit, tx, ty } => {
+                    let _ = self.apply_rally(unit, tx, ty);
                 }
             }
         }
@@ -270,11 +310,99 @@ impl Sim {
             std::mem::take(&mut d.0)
         };
         for (owner, slot, amount) in deps {
+            if owner == REOPEN_OWNER && slot == REOPEN_MARKER {
+                // amount packs (fx<<24)|(fy<<16)|(w<<8)|h for a wrecked footprint.
+                let fx = (amount >> 24) & 255;
+                let fy = (amount >> 16) & 255;
+                let w = (amount >> 8) & 255;
+                let h = amount & 255;
+                for yy in fy..fy + h {
+                    for xx in fx..fx + w {
+                        self.grid.set_blocked(
+                            TilePos {
+                                x: xx as i16,
+                                y: yy as i16,
+                            },
+                            false,
+                        );
+                    }
+                }
+                continue;
+            }
             if (owner as usize) < self.players.len() {
-                self.players[owner as usize].stock.add(slot, amount as i64);
+                if slot == TRAIN_SCORE_MARKER || slot == BUILD_SCORE_MARKER {
+                    self.players[owner as usize].score += amount as i64;
+                } else {
+                    self.players[owner as usize].stock.add(slot, amount as i64);
+                    self.players[owner as usize].score += harvest_score_inc(amount);
+                }
             }
         }
+        // v2: age-up timers tick after system resolution (AgeUp command sets target + timer).
+        for pl in self.players.iter_mut() {
+            if pl.age_timer > 0 && (pl.age as u32) < pl.age_target as u32 {
+                pl.age_timer -= 1;
+                if pl.age_timer == 0 {
+                    pl.age = pl.age_target.min(3);
+                }
+            }
+        }
+        // v2: win check — enemy TownCenter destroyed OR 20-min score cap. Runs AFTER systems so
+        // destroyed buildings are settled; both players' winner flags update atomically.
+        self.victory_check();
         Ok(())
+    }
+
+    /// Declare winner: 1) an enemy TownCenter (kind 0, status Done) has zero surviving copies
+    /// while the player's own TC still exists -> player wins; 2) at MATCH_TICKS the higher score
+    /// wins (ties resolve to player 0's id + 1 marker; no winner stays 0 while both alive).
+    fn victory_check(&mut self) {
+        if self.players.iter().any(|p| p.winner != 0) {
+            return; // one decisive result already recorded and hashed
+        }
+        let tcs_alive = |owner: u32| -> bool {
+            self.world
+                .storages
+                .iter::<Building>()
+                .any(|(_e, b)| b.owner == owner && b.kind == 0 && b.status == BuildingStatus::Done)
+        };
+        let tcs_dead = |owner: u32| -> bool {
+            let seen = self
+                .world
+                .storages
+                .iter::<Building>()
+                .any(|(_e, b)| b.owner == owner && b.kind == 0);
+            seen && !tcs_alive(owner)
+        };
+        let any_tc_dead = tcs_dead(0) || tcs_dead(1);
+        if any_tc_dead {
+            if tcs_alive(0) && !tcs_alive(1) {
+                self.players[0].winner = 1;
+                self.players[1].winner = 1;
+            } else if tcs_alive(1) && !tcs_alive(0) {
+                self.players[0].winner = 2;
+                self.players[1].winner = 2;
+            } else {
+                // Both destroyed (mutual annihilation) or one never existed: higher score wins.
+                let w = if self.players[0].score >= self.players[1].score {
+                    1
+                } else {
+                    2
+                };
+                self.players[0].winner = w;
+                self.players[1].winner = w;
+            }
+            return;
+        }
+        if self.world.tick >= MATCH_TICKS {
+            let w = if self.players[0].score >= self.players[1].score {
+                1
+            } else {
+                2
+            };
+            self.players[0].winner = w;
+            self.players[1].winner = w;
+        }
     }
 
     // ---- command application -------------------------------------------------
@@ -293,6 +421,10 @@ impl Sim {
             return Err(SimError::OutOfMap);
         }
         let (ux, uy) = self.unit_tile(unit)?;
+        if self.grid.is_blocked(TilePos { x, y }) {
+            // Walls/structures block their cells: an order onto one never arrives (v2 rule).
+            return Err(SimError::Occupied);
+        }
         match find_path(&self.grid, TilePos { x: ux, y: uy }, TilePos { x, y }) {
             Some(path) => {
                 self.world
@@ -304,16 +436,24 @@ impl Sim {
         }
     }
 
+    /// Attack order: target is a unit or a building entity (v2). Order carries the target id;
+    /// combat_system resolves unit-vs-unit and unit-vs-building with one representation.
     fn apply_attack(&mut self, unit: u32, target: u32) -> Result<(), SimError> {
         if self.world.storages.get::<Unit>(Entity(unit)).is_none() {
             return Err(SimError::UnknownUnit);
         }
-        if self.world.storages.get::<Unit>(Entity(target)).is_none() {
+        let is_unit = self.world.storages.get::<Unit>(Entity(target)).is_some();
+        let is_building = self
+            .world
+            .storages
+            .get::<Building>(Entity(target))
+            .is_some();
+        if !is_unit && !is_building {
             return Err(SimError::UnknownUnit);
         }
         self.world
             .storages
-            .add(Entity(unit), Order::Attack { target });
+            .add(Entity(unit), Order::UnitAttack { target });
         Ok(())
     }
 
@@ -389,8 +529,52 @@ impl Sim {
         if b.status != BuildingStatus::Done {
             return Err(SimError::BadCommand);
         }
-        if unit_kind > 2 {
+        if unit_kind as usize >= UNIT_KIND_COUNT {
             return Err(SimError::BadCommand);
+        }
+        let (gate_kind, gate_age) = train_gate(unit_kind).ok_or(SimError::BadCommand)?;
+        let owner = b.owner as usize;
+        // v2 gates: the player needs one *done* building of the gate kind and age >= gate_age.
+        {
+            let has_gate = self.world.storages.iter::<Building>().any(|(_e, bb)| {
+                bb.owner == b.owner && bb.kind == gate_kind && bb.status == BuildingStatus::Done
+            });
+            if !has_gate || self.players[owner].age < gate_age {
+                return Err(SimError::BadCommand);
+            }
+            // Pop supply from TC+Farms vs. current population (sum of unit pop).
+            let mut tcs = 0u32;
+            let mut farms = 0u32;
+            for (_e, bb) in self.world.storages.iter::<Building>() {
+                if bb.owner != b.owner || bb.status != BuildingStatus::Done {
+                    continue;
+                }
+                if bb.kind == 0 {
+                    tcs += 1;
+                } else if bb.kind == 1 {
+                    farms += 1;
+                }
+            }
+            let mut pop_used = 0u32;
+            for (_e, u) in self.world.storages.iter::<Unit>() {
+                if (u.owner as u32) == b.owner {
+                    pop_used += unit_spec(u.kind).pop;
+                }
+            }
+            let queue_pop: u32 = self
+                .world
+                .storages
+                .get::<TrainQueue>(Entity(building))
+                .map(|q| q.0.iter().map(|it| unit_spec(it.kind).pop).sum())
+                .unwrap_or(0);
+            let cap = pop_cap_for(tcs, farms);
+            if pop_used + queue_pop + unit_spec(unit_kind).pop > cap {
+                return Err(SimError::BadCommand); // pop cap reached (v2 rule)
+            }
+            // Training at this building must be its gate kind (no cross-building training).
+            if b.kind != gate_kind {
+                return Err(SimError::BadCommand);
+            }
         }
         let spec = unit_spec(unit_kind);
         let stock = &mut self.players[b.owner as usize].stock;
@@ -470,6 +654,63 @@ impl Sim {
             }
             None => Err(SimError::PathUnreachable),
         }
+    }
+
+    /// Apply an AgeUp command. Semantics: the player advances one age at a time
+    /// (target must be exactly current_age+1, no skipping); costs are paid immediately and the
+    /// upgrade completes after AGE_UP_TICKS[age] ticks of countdown (tick loop in step()).
+    fn apply_age_up(&mut self, player: u32, age: u8) -> Result<(), SimError> {
+        let age = age.min(3) as usize;
+        let pl = &mut self.players[player as usize];
+        if (pl.age as usize) + 1 != age {
+            return Err(SimError::BadCommand); // one step at a time, no skipping
+        }
+        if pl.age_timer > 0 {
+            return Err(SimError::BadCommand); // already advancing
+        }
+        let cost = AGE_COST[age];
+        {
+            let stock = &mut pl.stock;
+            if stock.get(0) < cost[0] || stock.get(1) < cost[1] || stock.get(2) < cost[2] {
+                return Err(SimError::Unaffordable);
+            }
+            stock.take(0, cost[0]);
+            stock.take(1, cost[1]);
+            stock.take(2, cost[2]);
+        }
+        pl.age_target = age as u8;
+        pl.age_timer = AGE_UP_TICKS[age];
+        Ok(())
+    }
+
+    /// v2: attach/replace a rally point on an owned, finished building.
+    fn apply_rally_point(
+        &mut self,
+        player: u32,
+        building: u32,
+        tx: i16,
+        ty: i16,
+    ) -> Result<(), SimError> {
+        let be = Entity(building);
+        let b = self
+            .world
+            .storages
+            .get::<Building>(be)
+            .ok_or(SimError::BadCommand)?;
+        if b.owner != player || b.status != BuildingStatus::Done {
+            return Err(SimError::BadCommand);
+        }
+        self.world.storages.add(be, RallyPoint { tx, ty });
+        Ok(())
+    }
+
+    /// v2: attach a unit rally target (harvest return hint).
+    fn apply_rally(&mut self, unit: u32, tx: i16, ty: i16) -> Result<(), SimError> {
+        if self.world.storages.get::<Unit>(Entity(unit)).is_none() {
+            return Err(SimError::UnknownUnit);
+        }
+        self.world.storages.add(Entity(unit), UnitRally { tx, ty });
+        Ok(())
     }
 
     // ---- spawning --------------------------------------------------------------
@@ -635,6 +876,10 @@ fn construction_system(world: &mut World, _tick: Tick) {
             } else {
                 b.status = BuildingStatus::Done;
                 b.hp = b.max_hp;
+                // v2 score: completed building +1 (tracked via Deposits marker drain in step()).
+                if let Some(d) = world.storages.get_mut::<Deposits>(Entity(0)) {
+                    d.0.push((b.owner as u8, BUILD_SCORE_MARKER, 1));
+                }
             }
         }
         world.storages.add(e, b);
@@ -663,6 +908,14 @@ fn training_system(world: &mut World, _tick: Tick) {
             let bx = p.x.to_int_trunc() as i16;
             let by = p.y.to_int_trunc() as i16;
             spawn_unit_at(world, _b.owner, item.kind, bx + 1, by + 1);
+            // v2 score: +2 per trained unit. training_system cannot see Sim.players, so it
+            // records the credit into the Deposits side storage (owner, kind=TRAIN_MARKER, amt),
+            // drained by Sim::step with the harvest deposits (same deterministic pass).
+            if let Some(d) = world.storages.get_mut::<Deposits>(Entity(0)) {
+                let inc = unit_spec(item.kind).pop as i32 * 2 + 2;
+                d.0.push((_b.owner as u8, TRAIN_SCORE_MARKER, inc));
+            }
+            let _ = (bx, by);
         }
         world.storages.add(e, q);
     }
@@ -942,6 +1195,7 @@ fn march(p: &mut Pt, goal: Pt, step: i64) -> bool {
 }
 
 fn movement_system(world: &mut World, _tick: Tick) {
+    let gs: Option<GridSide> = world.storages.get::<GridSide>(Entity(1)).cloned();
     let units: Vec<(Entity, u32)> = world
         .storages
         .iter::<Unit>()
@@ -966,7 +1220,19 @@ fn movement_system(world: &mut World, _tick: Tick) {
                     world.storages.add(e, Order::Idle);
                     continue;
                 }
+                // v2: if a wall/structure was placed into the path while walking, halt and idle
+                // (paths never cross blocked cells because build_at rejects occupied footprints).
                 let goal = Pt::center(path[waypoint]);
+                if gs.as_ref().is_some_and(|g| {
+                    gs_is_blocked(
+                        g,
+                        goal.x.to_int_trunc() as i16,
+                        goal.y.to_int_trunc() as i16,
+                    )
+                }) {
+                    world.storages.add(e, Order::Idle);
+                    continue;
+                }
                 let arrived = march(&mut p, goal, step);
                 let wp = if arrived { waypoint + 1 } else { waypoint };
                 world.storages.add(e, Pos { x: p.x, y: p.y });
@@ -1014,6 +1280,23 @@ fn movement_system(world: &mut World, _tick: Tick) {
                 }
             }
             Order::Idle | Order::Attack { .. } => {}
+            Order::UnitAttack { target } => {
+                // v2: walk toward the target's tile centre at normal speed until in range
+                // (combat_system then applies damage; we do not path — straight-line chase with
+                // the same march() maths as movement, so no new RNG/paths).
+                let tp = match world.storages.get::<Pos>(Entity(target)) {
+                    Some(pp) => Pt::from_pos(pp),
+                    None => {
+                        world.storages.add(e, Order::Idle);
+                        continue;
+                    }
+                };
+                let arrived = march(&mut p, tp, step);
+                world.storages.add(e, Pos { x: p.x, y: p.y });
+                if arrived {
+                    // Staying adjacent keeps the order (attack loop) — march pins us to the tile.
+                }
+            }
         }
     }
 }
@@ -1059,7 +1342,7 @@ fn combat_system(world: &mut World, _tick: Tick) {
         .storages
         .iter::<Order>()
         .filter_map(|(e, o)| match o {
-            Order::Attack { target } => {
+            Order::Attack { target } | Order::UnitAttack { target } => {
                 let u = world.storages.get::<Unit>(e)?;
                 let p = world.storages.get::<Pos>(e)?;
                 Some((e, *target, u.dmg, u.range, Pt::from_pos(p)))
@@ -1068,11 +1351,31 @@ fn combat_system(world: &mut World, _tick: Tick) {
         })
         .collect();
     let mut dead: Vec<Entity> = Vec::new();
+    let mut dead_units: Vec<Entity> = Vec::new();
     for (e, target, dmg, range, from) in attackers {
-        if dead.contains(&e) {
+        if dead_units.contains(&e) {
             continue;
         }
-        if world.storages.get::<Unit>(Entity(target)).is_none() {
+        if world.storages.get::<Unit>(Entity(target)).is_some() {
+            let tp = match world.storages.get::<Pos>(Entity(target)) {
+                Some(p) => *p,
+                None => continue,
+            };
+            let dx = tp.x.0 - from.x.0;
+            let dy = tp.y.0 - from.y.0;
+            let r = range.0;
+            if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) <= r.wrapping_mul(r) {
+                if let Some(tu) = world.storages.get_mut::<Unit>(Entity(target)) {
+                    tu.hp = tu.hp.saturating_sub(dmg);
+                    if tu.hp <= 0 {
+                        dead_units.push(Entity(target));
+                    }
+                }
+            }
+            continue;
+        }
+        // v2: target is a building — melee range (fixed reach), destructible walls/structures.
+        if world.storages.get::<Building>(Entity(target)).is_none() {
             continue;
         }
         let tp = match world.storages.get::<Pos>(Entity(target)) {
@@ -1081,25 +1384,129 @@ fn combat_system(world: &mut World, _tick: Tick) {
         };
         let dx = tp.x.0 - from.x.0;
         let dy = tp.y.0 - from.y.0;
-        let r = range.0;
+        let r = BUILDING_ATTACK_RANGE;
         if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) <= r.wrapping_mul(r) {
-            if let Some(tu) = world.storages.get_mut::<Unit>(Entity(target)) {
-                tu.hp = tu.hp.saturating_sub(dmg);
-                if tu.hp <= 0 {
+            let mut b = match world.storages.get::<Building>(Entity(target)) {
+                Some(b) => *b,
+                None => continue,
+            };
+            // Site/UnderConstruction take full damage; Wreck stays dead (hp 0) — never revives.
+            if b.status != BuildingStatus::Wreck {
+                let applied = dmg.saturating_add(WALL_BUILDING_DMG);
+                b.hp = b.hp.saturating_sub(applied as u32);
+                if b.hp == 0 {
+                    b.status = BuildingStatus::Wreck;
+                    b.timer = 0;
                     dead.push(Entity(target));
                 }
+                world.storages.add(Entity(target), b);
             }
         }
     }
-    dead.sort();
-    dead.dedup();
-    for e in dead {
+    dead_units.sort();
+    dead_units.dedup();
+    for e in dead_units {
         world.storages.remove::<Unit>(e);
         world.storages.remove::<Pos>(e);
         world.storages.remove::<Order>(e);
         world.storages.remove::<HarvestState>(e);
         world.storages.remove::<WorkJob>(e);
+        world.storages.remove::<UnitRally>(e);
         world.storages.despawn(e);
+    }
+    dead.sort();
+    dead.dedup();
+    // v2: wrecked buildings reopen their footprint. Record (fx, fy, w, h) keys in Deposits
+    // (REOPEN_OWNER/REOPEN_MARKER) and let Sim::step fold them into the authoritative grid.
+    let mut reopen_keys: Vec<i32> = Vec::new();
+    for e in dead.iter() {
+        if let Some(b) = world.storages.get::<Building>(*e).copied() {
+            if b.status != BuildingStatus::Wreck {
+                continue;
+            }
+            let spec = building_spec(b.kind);
+            if let Some(p) = world.storages.get::<Pos>(*e).copied() {
+                let cx = p.x.to_int_trunc();
+                let cy = p.y.to_int_trunc();
+                let fx = cx - (spec.w as i32) / 2;
+                let fy = cy - (spec.h as i32) / 2;
+                reopen_keys
+                    .push((fx << 24) | (fy << 16) | ((spec.w as i32) << 8) | (spec.h as i32));
+            }
+        }
+    }
+    if !reopen_keys.is_empty() {
+        if let Some(d) = world.storages.get_mut::<Deposits>(Entity(0)) {
+            for key in reopen_keys {
+                d.0.push((REOPEN_OWNER, REOPEN_MARKER, key));
+            }
+        }
+    }
+    for e in dead {
+        world.storages.remove::<Order>(e);
+        world.storages.remove::<TrainQueue>(e);
+        world.storages.remove::<RallyPoint>(e);
+        world.storages.remove::<Pos>(e);
+        world.storages.despawn(e);
+    }
+}
+
+// ---- test-only helpers (cfg(test) only; zero impact on production determinism) ----
+impl Sim {
+    /// Thin wrapper over the private command path (same code as live play).
+    pub fn apply_move_for_test(&mut self, unit: u32, x: i16, y: i16) -> Result<(), SimError> {
+        self.apply_move(unit, x, y)
+    }
+
+    pub fn add_order_for_test(&mut self, unit: u32, target: u32) {
+        self.world
+            .storages
+            .add(Entity(unit), Order::Attack { target });
+    }
+
+    /// Route through the production Command path (gate/pop/cost logic single-sourced).
+    pub fn train_via_command(
+        &mut self,
+        player: u32,
+        building: u32,
+        unit_kind: u16,
+    ) -> Result<(), SimError> {
+        let _ = player;
+        self.apply_train(building, unit_kind)
+    }
+
+    pub fn tile_of_unit(&self, unit: u32) -> Option<(i16, i16)> {
+        self.unit_tile(unit).ok()
+    }
+
+    pub fn first_building_entity_of(&self, owner: u32, kind: u16) -> u32 {
+        for (e, b) in self.world.storages.iter::<Building>() {
+            if b.owner == owner && b.kind == kind && b.status == BuildingStatus::Done {
+                return e.0;
+            }
+        }
+        0
+    }
+
+    pub fn building_at(&self, owner: u32, kind: u16, x: i16, y: i16) -> u32 {
+        for (e, b) in self.world.storages.iter::<Building>() {
+            if b.owner == owner && b.kind == kind {
+                if let Some(pp) = self.world.storages.get::<Pos>(e) {
+                    if (tile_of(pp.x), tile_of(pp.y)) == (x, y) {
+                        return e.0;
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    pub fn building_wrecked(&self, entity: u32) -> bool {
+        self.world
+            .storages
+            .get::<Building>(Entity(entity))
+            .map(|b| b.status == BuildingStatus::Wreck)
+            .unwrap_or(false)
     }
 }
 
@@ -1220,6 +1627,12 @@ impl Sim {
             h.write_u32(pl.age as u32);
             h.write_u32(pl.wonder);
             h.write_u64(pl.wonder_started);
+            // v2 hashed state (new in SIM_VERSION=3).
+            h.write_u32(pl.age_target as u32);
+            h.write_u32(pl.age_timer);
+            h.write_u32(pl.civ as u32);
+            h.write_i64(pl.score);
+            h.write_u32(pl.winner);
         }
         for v in &self.vis {
             v.hash_into(&mut h);
@@ -1244,6 +1657,9 @@ impl Sim {
                     h.write_u16(it.kind);
                     h.write_u32(it.ticks_left);
                 }
+            }
+            if let Some(r) = self.world.storages.get::<RallyPoint>(*e) {
+                r.hash_into(&mut h);
             }
         }
         let mut ns: Vec<(Entity, &ResourceNode)> =
@@ -1278,6 +1694,9 @@ impl Sim {
             }
             if let Some(w) = self.world.storages.get::<WorkJob>(*e) {
                 w.hash_into(&mut h);
+            }
+            if let Some(r) = self.world.storages.get::<UnitRally>(*e) {
+                r.hash_into(&mut h);
             }
         }
         h.finish()

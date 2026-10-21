@@ -12,7 +12,12 @@ pub mod sim;
 pub use sim::{run_sim, Sim, SimError};
 
 /// Bump deliberately on intentional sim-math changes.
-pub const SIM_VERSION: u32 = 2;
+/// v3 (2026-10-21): AoE loop — AgeUp costs/timers (AGE_UP_TICKS/AGE_COST), building pop gates
+/// + pop caps (TC/Farm supply), RallyPoint/UnitRally components, Wall/Factory building kinds,
+///   building-destroyable combat (Wreck status), victory_check (TC kill / MATCH_TICKS score), and
+///   PlayerState age/score/winner fields. All hash-visible; golden stream re-baselined in
+///   tests/determinism.rs. Command wire format unchanged (tags 1-10).
+pub const SIM_VERSION: u32 = 3;
 /// Fixed tick rate. The host (server/client) owns the clock; the sim only advances ticks.
 pub const TICK_HZ: u64 = 30;
 

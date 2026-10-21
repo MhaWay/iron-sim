@@ -32,7 +32,9 @@ impl Resource {
     }
 }
 
-/// Building kinds (faction 1 Kingdom of Aldren for MVP; kind ids are canonical).
+/// Building kinds. Ids are canonical and frozen: v2 appends Factory=7 and Wall=8 after the
+/// Phase-1 ids 0..6, so the wire format (u16 kind in Command::Build) never renumbers history.
+/// Faction display names differ (Adepts: Bastion for Wall; Dominion: just Wall) but the ids are shared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum BuildingKind {
@@ -43,15 +45,24 @@ pub enum BuildingKind {
     Watchtower = 4,
     MageTower = 5,
     Wonder = 6,
+    /// v2: military factory (unit-gate tier 2).
+    Factory = 7,
+    /// v2: cheap stone line-wall; blocks its tile, destructible (hp), blocks pathfinding.
+    Wall = 8,
 }
 
-/// Unit kinds (faction 1 MVP; kind ids are canonical, used in Train).
+/// Unit kinds (canonical ids used by Train; v2 appends the heavy tiers 3/4; unit 5 is an age-3
+/// elite for both civs; kind ids map onto per-civ flavor names only in display tables).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum UnitKind {
     Serf = 0,
     Militia = 1,
     Archer = 2,
+    /// v2: heavy melee (Adeptus Knight / Dominion Marine MKII siege-line), age 2 gate.
+    Knight = 3,
+    /// v2: heavy ranged siege (Adeptus Officer / Dominion Siege), age 3 gate.
+    Siege = 4,
 }
 
 /// Player command. Tile coordinates are i16 integers.
@@ -73,8 +84,12 @@ pub enum Command {
     Sacrifice { unit: u32 },
     /// Structure-only Phase-2 (faction 3): evolve tier by consuming units. No sim behavior yet.
     Evolve { tier: u8, unit_type: u16 },
-    /// Structure-only Phase-2 (faction 1 Golden Age gate): advance age. No sim behavior yet.
+    /// v2: advance to age N for the issuing player (AoE ladder 0..3; costs per age, economy::AGE_COST).
     AgeUp { age: u8 },
+    /// v2: attach a rally point (tx,ty) to `building` (unit spawn / drop-off target hint).
+    RallyPoint { building: u32, tx: i16, ty: i16 },
+    /// v2: set a unit rally target (currently guides the harvest return point).
+    Rally { unit: u32, tx: i16, ty: i16 },
 }
 
 impl Command {
@@ -94,6 +109,9 @@ impl Command {
             Command::Sacrifice { unit } => (*unit, 6, 0, 0),
             Command::Evolve { tier, unit_type } => (*unit_type as u32, 7, *tier as i64, 0),
             Command::AgeUp { age } => (*age as u32, 8, 0, 0),
+            // v2: disc 9 = RallyPoint(building), disc 10 = Rally(unit). AgeUp keeps frozen 8.
+            Command::RallyPoint { building, tx, ty } => (*building, 9, *tx as i64, *ty as i64),
+            Command::Rally { unit, tx, ty } => (*unit, 10, *tx as i64, *ty as i64),
         }
     }
     pub fn kind_disc(&self) -> u8 {
@@ -167,6 +185,18 @@ impl TickCommands {
                 Command::AgeUp { age } => {
                     h.u8(8);
                     h.u8(age);
+                }
+                Command::RallyPoint { building, tx, ty } => {
+                    h.u8(9);
+                    h.u32(building);
+                    h.i16(tx);
+                    h.i16(ty);
+                }
+                Command::Rally { unit, tx, ty } => {
+                    h.u8(10);
+                    h.u32(unit);
+                    h.i16(tx);
+                    h.i16(ty);
                 }
             }
         }
@@ -361,6 +391,38 @@ mod tests {
             7
         );
         assert_eq!(Command::AgeUp { age: 2 }.kind_disc(), 8);
+        // v2 slots: RallyPoint 9 (building key), Rally 10 (unit key) — never renumbered.
+        assert_eq!(
+            Command::RallyPoint {
+                building: 7,
+                tx: 1,
+                ty: 2
+            }
+            .kind_disc(),
+            9
+        );
+        assert_eq!(
+            Command::Rally {
+                unit: 7,
+                tx: 1,
+                ty: 2
+            }
+            .kind_disc(),
+            10
+        );
+        // RallyPoint sorts by building, Rally by unit: same disc-space, total order.
+        let rp = Command::RallyPoint {
+            building: 1,
+            tx: 0,
+            ty: 0,
+        };
+        let ru = Command::Rally {
+            unit: 1,
+            tx: 0,
+            ty: 0,
+        };
+        assert_eq!(rp.sort_key().0, 1);
+        assert_eq!(ru.sort_key().1, 10);
     }
     #[test]
     fn hash_stable_and_order_sensitive() {
