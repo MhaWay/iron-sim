@@ -1,0 +1,4 @@
+
+# C++ build artifacts
+simcpp/build/
+simcpp/**/*.o

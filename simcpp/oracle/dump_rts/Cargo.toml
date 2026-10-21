@@ -1,0 +1,13 @@
+# Standalone oracle dumper: RTS
+[workspace]
+[package]
+name = "dump_rts"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../../../rts-game/crates/shared" }
+game = { path = "../../../rts-game/crates/game" }
+engine-core = { path = "../../../engine/crates/core" }
+engine-ecs = { path = "../../../engine/crates/ecs" }
+engine-path = { path = "../../../engine/crates/path" }

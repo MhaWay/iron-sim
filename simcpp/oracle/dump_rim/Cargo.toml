@@ -1,0 +1,13 @@
+# Standalone oracle dumper: RimWorld-like
+[workspace]
+[package]
+name = "dump_rim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../../../rimworld-game/crates/shared" }
+sim = { path = "../../../rimworld-game/crates/sim" }
+engine-core = { path = "../../../engine/crates/core" }
+engine-ecs = { path = "../../../engine/crates/ecs" }
+engine-path = { path = "../../../engine/crates/path" }
