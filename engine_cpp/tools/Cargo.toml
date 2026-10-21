@@ -1,0 +1,18 @@
+# Parity-vector generator wrapper (task-4). Builds and runs tools/dump_vectors.rs
+# against the UNMODIFIED Rust workspaces (path deps, read-only) and writes the
+# resulting JSON files into ../testdata. Run via tools/run_dump.sh.
+[package]
+name = "cpp_engine_dump_vectors"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+engine-core = { path = "../../engine/crates/core" }
+shared = { path = "../../rts-game/crates/shared" }
+
+[workspace]
+
+[[bin]]
+name = "dump_vectors"
+path = "tools/dump_vectors.rs"
