@@ -2,3 +2,6 @@
 # C++ build artifacts
 simcpp/build/
 simcpp/**/*.o
+
+# oracle dumper build artifacts
+simcpp/oracle/dump_rts/target/
