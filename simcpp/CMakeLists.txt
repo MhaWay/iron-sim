@@ -59,9 +59,11 @@ endfunction()
 simcpp_app(demo)
 simcpp_app(dedicated_server)
 simcpp_app(rts_client)
+simcpp_app(bench)
 
 # P2P test uses UDP loopback; runs two in-process clients.
 add_executable(net_p2p_parity test/net_p2p_parity.cpp)
 target_include_directories(net_p2p_parity PRIVATE test include ${ENGINE_CPP_DIR}/include)
 target_link_libraries(net_p2p_parity PRIVATE sim_cpp)
 add_test(NAME net_p2p_parity COMMAND net_p2p_parity)
+simcpp_app(pathbench)
