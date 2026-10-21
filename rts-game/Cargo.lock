@@ -46,6 +46,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "render"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-ecs",
+ "engine-path",
+ "game",
+ "shared",
+]
+
+[[package]]
 name = "server"
 version = "0.1.0"
 dependencies = [

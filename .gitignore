@@ -5,3 +5,6 @@ simcpp/**/*.o
 
 # oracle dumper build artifacts
 simcpp/oracle/dump_rts/target/
+
+# release packaging output
+dist/
