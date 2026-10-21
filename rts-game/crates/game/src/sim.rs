@@ -686,12 +686,23 @@ fn harvest_system(world: &mut World, _tick: Tick) {
                     world.storages.add(e, Order::Idle);
                     continue;
                 }
-                if matches!(world.storages.get::<Order>(e), Some(Order::Idle)) {
+                if matches!(
+                    world.storages.get::<Order>(e),
+                    Some(Order::Idle) | Some(Order::Harvest { .. })
+                ) {
                     if let Some(np) = world.storages.get::<NodePos>(Entity(node)).cloned() {
                         let (px, py) = match world.storages.get::<Pos>(e) {
                             Some(pp) => (tile_of(pp.x), tile_of(pp.y)),
                             None => continue,
                         };
+                        // A non-empty path is in flight: movement owns the unit.
+                        let walking = matches!(
+                            world.storages.get::<Order>(e),
+                            Some(Order::Harvest { path, .. }) if !path.is_empty()
+                        );
+                        if walking {
+                            continue;
+                        }
                         if manhattan(px as i32 - np.x as i32, py as i32 - np.y as i32) <= 1 {
                             world.storages.remove::<HarvestState>(e);
                             world.storages.add(
@@ -702,9 +713,29 @@ fn harvest_system(world: &mut World, _tick: Tick) {
                                     ticks_left: PICK_TICKS,
                                 },
                             );
-                        } else {
-                            world.storages.add(e, HarvestState::ToNode { node, slot });
+                            continue;
                         }
+                        // Idle but not adjacent (path exhausted mid-route or a
+                        // blocked goal left no path): re-path toward the node.
+                        if let Some(gs) = &gs {
+                            if let Some(path) = bfs_path(gs, px, py, np.x, np.y) {
+                                if path.is_empty() {
+                                    world.storages.remove::<HarvestState>(e);
+                                    world.storages.add(
+                                        e,
+                                        HarvestState::Picking {
+                                            node,
+                                            slot,
+                                            ticks_left: PICK_TICKS,
+                                        },
+                                    );
+                                    continue;
+                                }
+                                world.storages.add(e, Order::Move { path, waypoint: 0 });
+                            }
+                        }
+                        world.storages.add(e, HarvestState::ToNode { node, slot });
+                        continue;
                     } else {
                         world.storages.remove::<HarvestState>(e);
                         world.storages.add(e, Order::Idle);
@@ -754,7 +785,7 @@ fn harvest_system(world: &mut World, _tick: Tick) {
                         Some(p) => (tile_of(p.x), tile_of(p.y)),
                         None => continue,
                     };
-                    if manhattan((tx - px) as i32, (ty - py) as i32) <= 1 {
+                    if manhattan((tx - px) as i32, (ty - py) as i32) <= 2 {
                         let take = if let Some(n) = world.storages.get::<ResourceNode>(Entity(node))
                         {
                             (amount as i64).min(n.remaining.max(0)) as i32
@@ -778,8 +809,71 @@ fn harvest_system(world: &mut World, _tick: Tick) {
                         None => continue,
                     };
                     if let Some((tx, ty)) = find_tc(world, owner as u32) {
-                        if let Some(path) = bfs_path(gs, px, py, tx, ty) {
-                            world.storages.add(e, Order::Move { path, waypoint: 0 });
+                        // The TC footprint itself is blocked, so BFS to the centre
+                        // tile would fail. Scan the deterministic 8-neighbour ring
+                        // around the TC; move to the nearest reachable tile and
+                        // let the adjacent check above deposit at distance 1.
+                        // The TC footprint blocks the centre and all radius-1 ring tiles,
+                        // so scan the radius-2 ring; the deposit check is manhattan<=2.
+                        let ring: [(i16, i16); 16] = [
+                            (-2, 0),
+                            (2, 0),
+                            (0, -2),
+                            (0, 2),
+                            (-1, -2),
+                            (-1, 2),
+                            (1, -2),
+                            (1, 2),
+                            (-2, -1),
+                            (-2, 1),
+                            (2, -1),
+                            (2, 1),
+                            (-2, -2),
+                            (-2, 2),
+                            (2, -2),
+                            (2, 2),
+                        ];
+                        let mut best: Option<(i32, (i16, i16))> = None;
+                        for (ox, oy) in ring {
+                            let gx = tx + ox;
+                            let gy = ty + oy;
+                            if gs_is_blocked(gs, gx, gy) {
+                                continue;
+                            }
+                            if bfs_path(gs, px, py, gx, gy).is_none() {
+                                continue;
+                            }
+                            let d = (gx - px).abs() as i32 + (gy - py).abs() as i32;
+                            match best {
+                                Some((bd, _)) if bd <= d => {}
+                                _ => best = Some((d, (gx, gy))),
+                            }
+                        }
+                        if let Some((_, (gx, gy))) = best {
+                            if let Some(path) = bfs_path(gs, px, py, gx, gy) {
+                                if path.is_empty() {
+                                    // Already adjacent: deposit right here.
+                                    let take = if let Some(n) =
+                                        world.storages.get::<ResourceNode>(Entity(node))
+                                    {
+                                        (amount as i64).min(n.remaining.max(0)) as i32
+                                    } else {
+                                        0
+                                    };
+                                    if let Some(n) =
+                                        world.storages.get_mut::<ResourceNode>(Entity(node))
+                                    {
+                                        n.remaining -= take as i64;
+                                    }
+                                    if take > 0 {
+                                        deposits.push((owner, slot, take));
+                                    }
+                                    world.storages.remove::<HarvestState>(e);
+                                    world.storages.add(e, Order::Idle);
+                                    continue;
+                                }
+                                world.storages.add(e, Order::Move { path, waypoint: 0 });
+                            }
                         }
                     }
                 }
@@ -884,14 +978,8 @@ fn movement_system(world: &mut World, _tick: Tick) {
             }
             Order::Harvest { node, mut path } => {
                 if path.is_empty() {
-                    world.storages.add(
-                        e,
-                        HarvestState::Picking {
-                            node,
-                            slot: 0,
-                            ticks_left: PICK_TICKS,
-                        },
-                    );
+                    // Path exhausted: hand back to the harvest mirror, which
+                    // owns the state machine (slot survives, no hardcode).
                     world.storages.add(e, Order::Idle);
                 } else {
                     let goal = Pt::center(path[0]);
