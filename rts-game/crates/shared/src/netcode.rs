@@ -249,11 +249,17 @@ pub fn cmd_write(w: &mut Writer, c: &Command) {
             w.u8(2);
             w.u32(*unit);
         }
-        Command::Build { building, x, y } => {
+        Command::Build {
+            building,
+            x,
+            y,
+            level,
+        } => {
             w.u8(3);
             w.u16(*building);
             w.i16(*x);
             w.i16(*y);
+            w.u8(*level);
         }
         Command::Train {
             building,
@@ -319,6 +325,7 @@ pub fn cmd_read(r: &mut Reader) -> Result<Command, WireError> {
             building: r.u16()?,
             x: r.i16()?,
             y: r.i16()?,
+            level: r.u8()?,
         },
         4 => Command::Train {
             building: r.u32()?,
@@ -1161,6 +1168,7 @@ mod tests {
                 building: 7,
                 x: -8,
                 y: 9,
+                level: 1,
             },
             Command::Train {
                 building: 10,

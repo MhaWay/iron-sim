@@ -18,7 +18,18 @@ pub use sim::{run_sim, Sim, SimError};
 ///   building-destroyable combat (Wreck status), victory_check (TC kill / MATCH_TICKS score), and
 ///   PlayerState age/score/winner fields. All hash-visible; golden stream re-baselined in
 ///   tests/determinism.rs. Command wire format unchanged (tags 1-10).
-pub const SIM_VERSION: u32 = 4;
+///
+/// v4 (2026-10-22): Tier A long-match mechanics — node regen waves + army upkeep/starvation
+///   (see docs/tier-a-longmatch.md).
+///
+/// v5 (2026-10-22): Tier A.4 siege/ranged pressure — melee damage falloff vs walls by
+///   wall level (WALL_MELEE_FALLOFF), siege bonus (SIEGE_BUILDING_MULT vs buildings,
+///   SIEGE_UNIT_MULT vs units) + deterministic Gather auto-loop (worker re-targets the nearest
+///   live node of the same slot after a deposit; no rng). Command::Build grew a trailing
+///   level byte (wall tier 1..=3, 0/ignored for non-walls) — wire tag 3 layout changed and
+///   netcode encode/decode updated; golden stream re-baselined. All sim math stays integer /
+///   Fixed1616 only.
+pub const SIM_VERSION: u32 = 5;
 /// Fixed tick rate. The host (server/client) owns the clock; the sim only advances ticks.
 pub const TICK_HZ: u64 = 30;
 

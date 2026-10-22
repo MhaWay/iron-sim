@@ -76,7 +76,14 @@ pub enum Command {
     /// Clear all orders for unit.
     Stop { unit: u32 },
     /// Place and construct a building (building-kind, tile x, y). Costs checked at apply.
-    Build { building: u16, x: i16, y: i16 },
+    Build {
+        building: u16,
+        x: i16,
+        y: i16,
+        /// v5 (Tier A.4): wall tier 1..=3 (1 = plain). 0 is accepted and treated as 1.
+        /// Ignored by every non-wall building. Appended after y so canonical order stays deterministic.
+        level: u8,
+    },
     /// Enqueue training of unit-kind in building entity.
     Train { building: u32, unit_kind: u16 },
     /// Start worker harvest loop for resource.
@@ -101,7 +108,7 @@ impl Command {
             Command::Move { unit, x, y } => (*unit, 0, *x as i64, *y as i64),
             Command::Attack { unit, target } => (*unit, 1, *target as i64, 0),
             Command::Stop { unit } => (*unit, 2, 0, 0),
-            Command::Build { building, x, y } => (*building as u32, 3, *x as i64, *y as i64),
+            Command::Build { building, x, y, .. } => (*building as u32, 3, *x as i64, *y as i64),
             Command::Train {
                 building,
                 unit_kind,
@@ -155,11 +162,17 @@ impl TickCommands {
                     h.u8(2);
                     h.u32(unit);
                 }
-                Command::Build { building, x, y } => {
+                Command::Build {
+                    building,
+                    x,
+                    y,
+                    level,
+                } => {
                     h.u8(3);
                     h.u16(building);
                     h.i16(x);
                     h.i16(y);
+                    h.u8(level);
                 }
                 Command::Train {
                     building,
@@ -374,6 +387,7 @@ mod tests {
             building: 1,
             x: 5,
             y: 5,
+            level: 1,
         };
         let b = Command::Train {
             building: 1,

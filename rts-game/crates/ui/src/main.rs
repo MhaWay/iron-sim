@@ -24,8 +24,10 @@ fn main() -> eframe::Result<()> {
             }
         }
     }
-    diag::line(&format!("renderer={renderer:?} args={args:?} WGPU_BACKEND={:?}",
-        std::env::var("WGPU_BACKEND").ok()));
+    diag::line(&format!(
+        "renderer={renderer:?} args={args:?} WGPU_BACKEND={:?}",
+        std::env::var("WGPU_BACKEND").ok()
+    ));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1034.0, 1150.0]),
         renderer,

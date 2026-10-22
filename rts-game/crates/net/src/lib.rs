@@ -674,6 +674,7 @@ pub fn restore_sim(sim: &mut game::Sim, snap: &StateSnapshot) -> Result<(), NetE
                 hp: bw.hp,
                 max_hp: bw.max_hp,
                 timer: bw.timer,
+                wall_level: 1,
             },
         );
         sim.world.storages.add(

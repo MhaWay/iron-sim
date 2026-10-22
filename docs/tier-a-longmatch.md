@@ -49,3 +49,13 @@ or (b) relax C++ stream-parity. mapgen work avoids this by not touching Sim::new
   economy vector re-run). v3+ stream parity is NOT ported to C++ — C++ test binaries
   pin the v2 legacy golden only and are labeled "legacy v2 oracle cross-check". Rust
   binaries are the delivery products.
+
+## v5 shipping note (2026-10-22, Tier A.4)
+- SIM_VERSION=5, golden re-baselined: 0x56BFC02DFC79B014 (6250926111555432468).
+  Cross-process verified (two independent release-binary runs, CARGO_TARGET_DIR split).
+- Changes: Command::Build carries a wall level byte (tag 3 layout changed — netcode
+  encode/decode updated); wall levels 1..=3 (hp +150/tier, cost +15/tier over base);
+  melee damage falloff vs walls by tier (WALL_MELEE_FALLOFF); siege (UnitKind::Siege)
+  x1.5 vs buildings (+15 bonus) and x1/4 vs units; deterministic Gather auto-loop after
+  deposit. deviating from design: falloff is damage-only (no attack-speed stat exists).
+  C++ (simcpp) still pins the v2 legacy oracle — unchanged, legacy cross-check only.

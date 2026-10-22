@@ -105,16 +105,40 @@ fn main() {
                         let (bx, by) = game::mapgen::base_centers(2)[p as usize];
                         // Farm anchored 7 tiles inside each base corner (rot180-symmetric about map center).
                         let (x, y) = (bx + 7, by + 7);
-                        cmds.push((p, shared::Command::Build { building: 1, x, y }));
+                        cmds.push((
+                            p,
+                            shared::Command::Build {
+                                building: 1,
+                                x,
+                                y,
+                                level: 1,
+                            },
+                        ));
                     }
                     if t == 40 {
                         let (x, y) = if p == 0 { (25, 18) } else { (102, 109) };
-                        cmds.push((p, shared::Command::Build { building: 3, x, y }));
+                        cmds.push((
+                            p,
+                            shared::Command::Build {
+                                building: 3,
+                                x,
+                                y,
+                                level: 1,
+                            },
+                        ));
                     }
                     if t == 70 {
                         // Wall anchors are exact rot180 mirrors (45,45) <-> (82,82); (83,83) kept per legacy
                         let (x, y) = if p == 0 { (45, 45) } else { (83, 83) };
-                        cmds.push((p, shared::Command::Build { building: 8, x, y }));
+                        cmds.push((
+                            p,
+                            shared::Command::Build {
+                                building: 8,
+                                x,
+                                y,
+                                level: 1,
+                            },
+                        ));
                     }
                     if t == 120 {
                         cmds.push((p, shared::Command::AgeUp { age: 1 }));

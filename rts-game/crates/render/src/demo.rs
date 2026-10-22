@@ -30,15 +30,39 @@ pub fn policy(sim: &mut Sim, tick: u64) -> Vec<(u32, Command)> {
         if tick == 8 {
             // Farm near own TC (coords picked clear via probes: seed-independent near-TC band)
             let (x, y) = if p == 0 { (21, 21) } else { (108, 108) };
-            out.push((p, Command::Build { building: 1, x, y }));
+            out.push((
+                p,
+                Command::Build {
+                    building: 1,
+                    x,
+                    y,
+                    level: 1,
+                },
+            ));
         }
         if tick == 40 {
             let (x, y) = if p == 0 { (25, 18) } else { (104, 111) };
-            out.push((p, Command::Build { building: 3, x, y }));
+            out.push((
+                p,
+                Command::Build {
+                    building: 3,
+                    x,
+                    y,
+                    level: 1,
+                },
+            ));
         }
         if tick == 70 {
             let (x, y) = if p == 0 { (45, 45) } else { (83, 83) };
-            out.push((p, Command::Build { building: 8, x, y }));
+            out.push((
+                p,
+                Command::Build {
+                    building: 8,
+                    x,
+                    y,
+                    level: 1,
+                },
+            ));
         }
         if tick == 120 {
             out.push((p, Command::AgeUp { age: 1 }));

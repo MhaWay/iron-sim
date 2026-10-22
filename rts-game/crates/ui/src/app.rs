@@ -297,7 +297,10 @@ impl eframe::App for UiApp {
         static UI1: std::sync::Once = std::sync::Once::new();
         UI1.call_once(|| {
             let scr = format!("{:?}", self.state.screen);
-            crate::diag::line(&format!("first ui() draw, screen={scr}, pixels_per_point={}", ui.ctx().pixels_per_point()));
+            crate::diag::line(&format!(
+                "first ui() draw, screen={scr}, pixels_per_point={}",
+                ui.ctx().pixels_per_point()
+            ));
         });
         match self.state.screen {
             Screen::Menu => self.menu_ui(ui),
@@ -860,6 +863,7 @@ impl UiApp {
                             building: kind,
                             x: tx,
                             y: ty,
+                            level: 1,
                         });
                         self.pending_place = None;
                     } else {

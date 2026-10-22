@@ -32,6 +32,43 @@ pub const POP_PER_TC: u32 = 8;
 pub const POP_PER_FARM: u32 = 4;
 /// Wall kind id (BuildingKind::Wall) and its stats (table entry 8 is the source of truth).
 pub const WALL_KIND: u16 = 8;
+
+/// v5 (Tier A.4): siege/ranged pressure constants.
+/// Default (and legacy) wall tier is 1. Higher tiers scale wall hp by WALL_TIER_HP and cost by
+/// WALL_TIER_COST (both applied in build_at for kind==WALL_KIND).
+pub const WALL_TIER_HP: u32 = 150;
+pub const WALL_TIER_COST: i64 = 15;
+/// Melee damage/speed falloff vs a wall: per-tier fixed-point factor (16.16). Tier 1 = 3/4
+/// (49152), tier 2 = 5/8 (40960), tier 3 = 1/2 (32768) — i.e. 3/4**tier * 1/2 cap.
+pub const WALL_MELEE_FALLOFF: [u32; 4] = [65536, 49152, 40960, 32768];
+/// Siege units (kind==4) bonus multiplier vs any building (fixed-point 16.16 = 1.5x).
+pub const SIEGE_BUILDING_MULT: i32 = 98304;
+/// Siege units falloff vs units (fixed-point 16.16 = 1/4).
+pub const SIEGE_UNIT_MULT: i32 = 16384;
+/// Melee (non-siege) units bonus multiplier vs buildings (v2: +15 flat). Kept as-is.
+pub const WALL_BUILDING_BONUS: i32 = 15;
+
+/// Max wall tier (1-based). build_at validates 1..MAX_WALL_TIER.
+pub const MAX_WALL_TIER: u8 = 3;
+
+/// Wall hp for tier t (spec base + tier*bonus). t=0 means "no tier" => base (tier 1).
+pub fn wall_hp(kind: u16, tier: u8) -> u32 {
+    let base = building_spec(kind).hp;
+    if kind == WALL_KIND {
+        base + ((tier.max(1) as u32) - 1) * WALL_TIER_HP
+    } else {
+        base
+    }
+}
+/// Stone (gold-slot) cost of a wall at tier t. t=0 => base cost (tier 1).
+pub fn wall_cost(kind: u16, tier: u8) -> i64 {
+    let base = building_spec(kind).gold;
+    if kind == WALL_KIND {
+        base + ((tier.max(1) as i64) - 1) * WALL_TIER_COST
+    } else {
+        base
+    }
+}
 pub const FACTORY_KIND: u16 = 7;
 /// AgeUp travel ticks per target age (0,600,900,1200 = 20/30/40 s @30 Hz).
 pub const AGE_UP_TICKS: [u32; 4] = [0, 600, 900, 1200];
@@ -137,6 +174,9 @@ pub struct Building {
     pub hp: u32,
     pub max_hp: u32,
     pub timer: u32,
+    /// v5 (Tier A.4): wall tier 1..=3 (0 = not a wall). Melee falloff scales with this; higher
+    /// tiers add hp +150/tier and +15 stone cost, same build_time. Hash-visible.
+    pub wall_level: u8,
 }
 
 /// One queued training job.

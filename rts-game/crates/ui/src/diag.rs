@@ -7,10 +7,15 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn log_path() -> PathBuf {
-    if let Some(mut p) = std::env::current_exe().ok() {
+    if let Ok(mut p) = std::env::current_exe() {
         p.pop();
         p.push("iron-sim-diag.log");
-        if std::fs::OpenOptions::new().create(true).append(true).open(&p).is_ok() {
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+            .is_ok()
+        {
             return p;
         }
     }
@@ -22,7 +27,11 @@ fn line_at(p: &std::path::Path, msg: &str) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
         let _ = writeln!(f, "[{ts}] {msg}");
         let _ = f.flush();
     }
@@ -39,7 +48,9 @@ pub fn init(bin: &str) {
         "--- {bin} v{} startup args={:?} cwd={:?} ---",
         env!("CARGO_PKG_VERSION"),
         std::env::args().collect::<Vec<_>>(),
-        std::env::current_dir().ok().map(|p| p.display().to_string()),
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string()),
     );
     line(&banner);
     let path = log_path();

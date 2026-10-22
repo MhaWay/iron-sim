@@ -10,11 +10,12 @@ use engine_path::{find_path, Grid, TilePos};
 use shared::{Command, Hasher, TickCommands, WriteHash};
 
 use crate::economy::{
-    building_spec, harvest_score_inc, pop_cap_for, train_gate, unit_spec, Building, BuildingStatus,
-    HarvestState, NodePos, PlayerState, RallyPoint, ResourceNode, TrainItem, TrainQueue, UnitRally,
-    Visibility, WorkJob, WorkMode, AGE_COST, AGE_UP_TICKS, CARRY, MAP_H, MAP_W, MATCH_TICKS,
-    PICK_TICKS, REGEN_AMOUNT, REGEN_INTERVAL, SIGHT_BASE, STARVE_SLOW, UNIT_KIND_COUNT, UPKEEP,
-    UPKEEP_GRACE, UPKEEP_INTERVAL,
+    building_spec, harvest_score_inc, pop_cap_for, train_gate, unit_spec, wall_cost, wall_hp,
+    Building, BuildingStatus, HarvestState, NodePos, PlayerState, RallyPoint, ResourceNode,
+    TrainItem, TrainQueue, UnitRally, Visibility, WorkJob, WorkMode, AGE_COST, AGE_UP_TICKS, CARRY,
+    MAP_H, MAP_W, MATCH_TICKS, MAX_WALL_TIER, PICK_TICKS, REGEN_AMOUNT, REGEN_INTERVAL,
+    SIEGE_BUILDING_MULT, SIEGE_UNIT_MULT, SIGHT_BASE, STARVE_SLOW, UNIT_KIND_COUNT, UPKEEP,
+    UPKEEP_GRACE, UPKEEP_INTERVAL, WALL_KIND, WALL_MELEE_FALLOFF,
 };
 use crate::SIM_VERSION;
 
@@ -27,6 +28,8 @@ const BUILD_SCORE_MARKER: u8 = 254;
 const REOPEN_OWNER: u8 = 255;
 /// Deposits slot used for wrecked-building footprint reopen.
 const REOPEN_MARKER: u8 = 252;
+/// v5 (Tier A.4): UnitKind treated as siege (bonus vs buildings, reduced vs units).
+const SIEGE_KIND: u16 = 4;
 pub const MAX_PLAYERS: usize = 2;
 /// Wonder must be held for this many ticks to win (15 min at 30 Hz).
 pub const VICTORY_WONDER_HOLD: u64 = 30 * 30 * 60;
@@ -311,8 +314,13 @@ impl Sim {
                 Command::Stop { unit } => {
                     let _ = self.apply_stop(unit);
                 }
-                Command::Build { building, x, y } => {
-                    let _ = self.build_at(player, building, x, y);
+                Command::Build {
+                    building,
+                    x,
+                    y,
+                    level,
+                } => {
+                    let _ = self.build_at_tier(player, building, x, y, level);
                 }
                 Command::Train {
                     building,
@@ -600,7 +608,32 @@ impl Sim {
     /// Place a building on behalf of `owner`. Cost check is all-or-nothing; footprint must be
     /// inside the map and not blocked (buildings do NOT overwrite existing structures — Occupied).
     pub fn build_at(&mut self, owner: u32, kind: u16, x: i16, y: i16) -> Result<(), SimError> {
+        // v5 (Tier A.4): legacy entry point; wall tier defaults to 1 (see build_at_tier).
+        self.build_at_tier(owner, kind, x, y, 0)
+    }
+
+    /// v5 (Tier A.4): build with an explicit wall tier. level 0 means "table default" (tier 1);
+    /// only kind == Wall uses it. Stone (slot 2) cost and hp scale with tier (WALL_TIER_COST/HP).
+    pub fn build_at_tier(
+        &mut self,
+        owner: u32,
+        kind: u16,
+        x: i16,
+        y: i16,
+        level: u8,
+    ) -> Result<(), SimError> {
         let spec = building_spec(kind);
+        let tier = if kind == WALL_KIND {
+            if level == 0 {
+                1u8
+            } else {
+                level.clamp(1, MAX_WALL_TIER)
+            }
+        } else {
+            0u8
+        };
+        let gold_cost = wall_cost(kind, tier);
+        let max_hp = wall_hp(kind, tier);
         let w = spec.w as i16;
         let h = spec.h as i16;
         if x < 0 || y < 0 || x + w > self.grid.w() as i16 || y + h > self.grid.h() as i16 {
@@ -616,14 +649,14 @@ impl Sim {
         let stock = &mut self.players[owner as usize].stock;
         if stock.get(1) < spec.wood
             || stock.get(0) < spec.food
-            || stock.get(2) < spec.gold
+            || stock.get(2) < gold_cost
             || stock.get(3) < spec.mana
         {
             return Err(SimError::Unaffordable);
         }
         stock.take(1, spec.wood);
         stock.take(0, spec.food);
-        stock.take(2, spec.gold);
+        stock.take(2, gold_cost);
         stock.take(3, spec.mana);
         let e = self.world.storages.spawn();
         self.world.storages.add(
@@ -633,8 +666,9 @@ impl Sim {
                 kind,
                 status: BuildingStatus::Site,
                 hp: 1,
-                max_hp: spec.hp,
+                max_hp,
                 timer: spec.build_time,
+                wall_level: tier,
             },
         );
         let (cx, cy) = tile_center(x + w / 2, y + h / 2);
@@ -884,6 +918,7 @@ impl Sim {
                     hp: spec.hp,
                     max_hp: spec.hp,
                     timer: 0,
+                    wall_level: 0,
                 },
             );
             let (cx, cy) = tile_center(px + 1, px + 1);
@@ -1180,10 +1215,62 @@ fn harvest_system(world: &mut World, _tick: Tick) {
                         }
                         if take > 0 {
                             deposits.push((owner, slot, take));
+                            // v5 (Tier A.4): Gather auto-loop — after a successful deposit the worker
+                            // re-issues the next gather without player input: re-target the nearest live
+                            // node of the same slot (deterministic: nearest manhattan, lowest entity id
+                            // tie-break, no rng). If none lives, idle. Nodes are map-shared, so owner
+                            // does not matter for targeting.
+                            if let Some((n, np)) =
+                                nearest_node_of(world, slot, world.storages.get::<Pos>(e))
+                            {
+                                world.storages.remove::<HarvestState>(e);
+                                world.storages.remove::<Order>(e);
+                                let (cx, cy) = match world.storages.get::<Pos>(e) {
+                                    Some(p) => (tile_of(p.x), tile_of(p.y)),
+                                    None => (np.0, np.1),
+                                };
+                                if (np.0 as i32 - cx as i32).abs() + (np.1 as i32 - cy as i32).abs()
+                                    <= 1
+                                {
+                                    world.storages.add(
+                                        e,
+                                        HarvestState::Picking {
+                                            node: n,
+                                            slot,
+                                            ticks_left: PICK_TICKS,
+                                        },
+                                    );
+                                } else if let Some(gs) = &gs {
+                                    match bfs_path(gs, cx, cy, np.0, np.1) {
+                                        Some(path) if !path.is_empty() => {
+                                            world.storages.add(e, Order::Harvest { node: n, path });
+                                            world
+                                                .storages
+                                                .add(e, HarvestState::ToNode { node: n, slot });
+                                        }
+                                        Some(_) => {
+                                            world.storages.add(
+                                                e,
+                                                HarvestState::Picking {
+                                                    node: n,
+                                                    slot,
+                                                    ticks_left: PICK_TICKS,
+                                                },
+                                            );
+                                        }
+                                        None => {
+                                            world.storages.add(e, Order::Idle);
+                                        }
+                                    }
+                                } else {
+                                    world.storages.add(e, Order::Idle);
+                                }
+                            } else {
+                                world.storages.remove::<HarvestState>(e);
+                                world.storages.add(e, Order::Idle);
+                            }
+                            continue;
                         }
-                        world.storages.remove::<HarvestState>(e);
-                        world.storages.add(e, Order::Idle);
-                        continue;
                     }
                 }
                 if let Some(gs) = &gs {
@@ -1273,6 +1360,31 @@ fn harvest_system(world: &mut World, _tick: Tick) {
 #[inline]
 fn node_alive(world: &World, node: u32) -> bool {
     matches!(world.storages.get::<ResourceNode>(Entity(node)), Some(n) if n.remaining > 0)
+}
+
+/// v5 (Tier A.4 auto-loop): nearest live node of `slot` by manhattan distance from `pos`
+/// (lowest entity id as deterministic tie-break; no rng). Returns (entity, tile) or None.
+fn nearest_node_of(world: &World, slot: u8, pos: Option<&Pos>) -> Option<(u32, (i16, i16))> {
+    let (px, py) = (tile_of(pos?.x), tile_of(pos?.y));
+    let mut ids: Vec<u32> = world
+        .storages
+        .iter::<ResourceNode>()
+        .filter(|(_e, n)| n.remaining > 0 && n.slot == slot)
+        .map(|(e, _n)| e.0)
+        .collect();
+    ids.sort_unstable();
+    let mut best: Option<(i32, u32, (i16, i16))> = None;
+    for id in ids {
+        let np = match world.storages.get::<NodePos>(Entity(id)) {
+            Some(np) => (np.x, np.y),
+            None => continue,
+        };
+        let d = (np.0 as i32 - px as i32).abs() + (np.1 as i32 - py as i32).abs();
+        if best.is_none() || d < best.as_ref().unwrap().0 {
+            best = Some((d, id, np));
+        }
+    }
+    best.map(|(_, id, np)| (id, np))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1495,8 +1607,19 @@ fn combat_system(world: &mut World, _tick: Tick) {
             let dy = tp.y.0 - from.y.0;
             let r = range.0;
             if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) <= r.wrapping_mul(r) {
+                // v5 (Tier A.4): siege units are weak vs units (SIEGE_UNIT_MULT), strong vs buildings.
+                let is_siege = world
+                    .storages
+                    .get::<Unit>(e)
+                    .map(|u| u.kind == SIEGE_KIND)
+                    .unwrap_or(false);
+                let eff = if is_siege {
+                    (dmg as i64 * SIEGE_UNIT_MULT as i64 / 65536) as i32
+                } else {
+                    dmg
+                };
                 if let Some(tu) = world.storages.get_mut::<Unit>(Entity(target)) {
-                    tu.hp = tu.hp.saturating_sub(dmg);
+                    tu.hp = tu.hp.saturating_sub(eff);
                     if tu.hp <= 0 {
                         dead_units.push(Entity(target));
                     }
@@ -1522,7 +1645,24 @@ fn combat_system(world: &mut World, _tick: Tick) {
             };
             // Site/UnderConstruction take full damage; Wreck stays dead (hp 0) — never revives.
             if b.status != BuildingStatus::Wreck {
-                let applied = dmg.saturating_add(WALL_BUILDING_DMG);
+                // v5 (Tier A.4): siege pressure — melee units fall off hard vs walls (scaled by
+                // wall tier), siege units multiply their damage vs every building; the flat
+                // WALL_BUILDING_DMG bonus still applies to non-siege attackers.
+                let atk_kind = world.storages.get::<Unit>(e).map(|u| u.kind).unwrap_or(0);
+                let is_siege = atk_kind == SIEGE_KIND;
+                let tier = (b.wall_level.max(1) as usize).min(WALL_MELEE_FALLOFF.len() - 1);
+                let mut applied = if is_siege {
+                    dmg.saturating_mul(SIEGE_BUILDING_MULT) / 65536 + WALL_BUILDING_DMG
+                } else {
+                    let mut v = dmg + WALL_BUILDING_DMG;
+                    if b.kind == WALL_KIND {
+                        v = (v as i64 * WALL_MELEE_FALLOFF[tier] as i64 / 65536) as i32;
+                    }
+                    v
+                };
+                if applied < 1 {
+                    applied = 1;
+                }
                 b.hp = b.hp.saturating_sub(applied as u32);
                 if b.hp == 0 {
                     b.status = BuildingStatus::Wreck;
