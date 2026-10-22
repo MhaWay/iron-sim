@@ -145,7 +145,7 @@ impl Order {
 }
 
 /// Harvest deposits queued during a system pass; drained by Sim::step into the stockpiles.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Deposits(pub Vec<(u8, u8, i32)>);
 
 /// Grid mirror for system-side pathfinding (systems only receive &mut World). Refreshed by
@@ -187,6 +187,26 @@ pub struct Sim {
     pub scheduler: Scheduler,
     pub players: Vec<PlayerState>,
     pub vis: Vec<Visibility>,
+}
+
+impl Clone for Sim {
+    fn clone(&self) -> Sim {
+        // Scheduler holds closures: rebuild it with the same registration order instead of cloning.
+        let mut scheduler = Scheduler::new();
+        scheduler.add_system("construction", construction_system);
+        scheduler.add_system("training", training_system);
+        scheduler.add_system("harvest", harvest_system);
+        scheduler.add_system("movement", movement_system);
+        scheduler.add_system("visibility", visibility_system);
+        scheduler.add_system("combat", combat_system);
+        Sim {
+            world: self.world.clone(),
+            grid: self.grid.clone(),
+            scheduler,
+            players: self.players.clone(),
+            vis: self.vis.clone(),
+        }
+    }
 }
 
 impl Sim {

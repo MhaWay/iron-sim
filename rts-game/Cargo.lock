@@ -1322,8 +1322,10 @@ dependencies = [
  "engine-ecs",
  "engine-path",
  "game",
+ "net",
  "render",
  "shared",
+ "tokio",
 ]
 
 [[package]]

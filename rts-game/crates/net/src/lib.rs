@@ -40,29 +40,106 @@ pub const DIGEST_WINDOW: usize = 128;
 pub const INPUT_DELAY: u64 = 1;
 pub const PROTO_ID: u32 = 1;
 
+pub type NetResult<T> = std::result::Result<T, NetError>;
+
 #[derive(Debug)]
 pub enum NetError {
-    Bind(String),
-    Wire,
+    Io(std::io::Error),
+    Sim(String),
+    PeerClosed,
+    Protocol(String),
+    Wire(shared::netcode::WireError),
     WireDetail(String),
     Transport(String),
-    Sim(game::SimError),
-    Closed,
+    Bind(String),
+}
+
+impl From<std::io::Error> for NetError {
+    fn from(e: std::io::Error) -> Self {
+        NetError::Io(e)
+    }
+}
+impl From<shared::netcode::WireError> for NetError {
+    fn from(e: shared::netcode::WireError) -> Self {
+        NetError::Wire(e)
+    }
 }
 
 impl std::fmt::Display for NetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            NetError::Bind(s) => write!(f, "bind: {s}"),
-            NetError::Wire => write!(f, "wire decode"),
-            NetError::WireDetail(s) => write!(f, "wire: {s}"),
-            NetError::Transport(s) => write!(f, "transport: {s}"),
-            NetError::Sim(e) => write!(f, "sim: {e:?}"),
-            NetError::Closed => write!(f, "connection closed"),
+            NetError::Io(e) => write!(f, "io: {e}"),
+            NetError::Sim(m) => write!(f, "sim: {m}"),
+            NetError::PeerClosed => write!(f, "peer closed"),
+            NetError::Protocol(m) => write!(f, "protocol: {m}"),
+            NetError::Wire(e) => write!(f, "wire: {e:?}"),
+            NetError::WireDetail(m) => write!(f, "wire: {m}"),
+            NetError::Transport(m) => write!(f, "transport: {m}"),
+            NetError::Bind(m) => write!(f, "bind: {m}"),
         }
     }
 }
+
 impl std::error::Error for NetError {}
+/// Send-safe wrapper for the authoritative sim snapshot. The inner Sim is mutated
+/// only from the session thread; cross-thread access here is read-only via `&Sim`
+/// (rendering / hash comparison). SAFETY: no field is ever mutated through a
+/// reference that crosses threads — snapshots are published, not aliased mutably.
+pub struct SendSim(pub game::Sim);
+unsafe impl Send for SendSim {}
+unsafe impl Sync for SendSim {}
+impl SendSim {
+    pub fn sim(&self) -> &game::Sim {
+        &self.0
+    }
+}
+/// Send-safe snapshot of the authoritative sim, shared with the UI lobby bridge.
+/// Sim is Send + Clone, so an Arc<Sim> inside a Mutex crosses threads safely.
+#[derive(Clone)]
+pub struct SharedSim(std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<SendSim>>>>);
+impl Default for SharedSim {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(None)))
+    }
+}
+impl SharedSim {
+    pub fn publish(&self, sim: std::sync::Arc<SendSim>) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = Some(sim);
+        }
+    }
+    pub fn get(&self) -> Option<game::Sim> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|s| s.0.clone()))
+    }
+    pub fn shared(&self) -> Option<std::sync::Arc<SendSim>> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+fn shared_sim(key: &str) -> SharedSim {
+    static SNAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, SharedSim>>,
+    > = std::sync::OnceLock::new();
+    if let Ok(mut r) = SNAP
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+    {
+        r.entry(key.to_string()).or_default().clone()
+    } else {
+        SharedSim::default()
+    }
+}
+
+pub fn snapshot_handle(key: &str) -> SharedSim {
+    shared_sim(key)
+}
+
+fn register_snapshot(key: &str, sim: &game::Sim) {
+    shared_sim(key).publish(std::sync::Arc::new(SendSim(sim.clone())));
+}
 
 pub struct Tls {
     pub server: quinn::ServerConfig,
@@ -133,7 +210,7 @@ pub(crate) async fn read_msg(mut s: quinn::RecvStream) -> Result<NetMsg, NetErro
     tokio::io::AsyncReadExt::read_to_end(&mut s, &mut buf)
         .await
         .map_err(transport_err)?;
-    msg_read(&buf).map_err(|_| NetError::Wire)
+    msg_read(&buf).map_err(|_| NetError::WireDetail("decode".into()))
 }
 
 pub(crate) fn transport_err<E: std::fmt::Debug>(e: E) -> NetError {
@@ -230,7 +307,7 @@ use game::sim::{Order, Pos, Unit};
 
 /// Collect the live entity-id set from a component's slot vec (entities() is not pub yet,
 /// and this stays correct if it becomes so).
-fn live_ids<T: 'static>(world: &engine_ecs::World) -> Vec<u32> {
+fn live_ids<T: Clone + 'static>(world: &engine_ecs::World) -> Vec<u32> {
     world.storages.iter::<T>().map(|(e, _)| e.0).collect()
 }
 
@@ -1015,7 +1092,9 @@ impl HostSession {
         batch.sort_by(|(pa, ca), (pb, cb)| {
             pa.cmp(pb).then_with(|| ca.sort_key().cmp(&cb.sort_key()))
         });
-        self.sim.step(&batch).map_err(NetError::Sim)?;
+        self.sim
+            .step(&batch)
+            .map_err(|e| NetError::Sim(format!("{e:?}")))?;
 
         self.ring.push_back((tick, batch.clone()));
         while self.ring.len() > DIGEST_WINDOW {
@@ -1036,6 +1115,7 @@ impl HostSession {
             .push_back(NetMsg::TickBatch { tick, cmds: batch });
 
         self.broadcast_digest();
+        register_snapshot("host", &self.sim);
         Ok(())
     }
 
@@ -1131,13 +1211,15 @@ impl ClientSession {
 
     pub fn apply_batch(&mut self, tick: u64, cmds: Vec<(u32, Command)>) -> Result<(), NetError> {
         if tick < self.next_tick {
-            return Err(NetError::Wire);
+            return Err(NetError::WireDetail("bad msg".into()));
         }
         // Late join / missed batch: fast-forward the clock (host-authoritative).
         if tick > self.next_tick {
             self.next_tick = tick;
         }
-        self.sim.step(&cmds).map_err(NetError::Sim)?;
+        self.sim
+            .step(&cmds)
+            .map_err(|e| NetError::Sim(format!("{e:?}")))?;
         self.ring.push_back((tick, cmds));
         while self.ring.len() > DIGEST_WINDOW {
             self.ring.pop_front();
@@ -1445,13 +1527,17 @@ pub async fn client_run(
             m = read_msg_pair(&conn) => {
                 let m = match m { Ok(m) => m, Err(_) => return Ok(()) };
                 match m {
-                    NetMsg::Welcome { player_id, .. } => {
+                    NetMsg::Welcome { player_id, sim_seed, preset, .. } => {
                         client.player_id = player_id;
-                        client.sim = game::Sim::new(cfg.seed);
+                        client.sim = game::Sim::new(sim_seed);
+                        if let Some(p) = game::mapgen::preset_by_name(&preset) {
+                            client.sim.install_map(game::mapgen::generate_map_preset(sim_seed, *p));
+                        }
                         client.started = true;
+                        register_snapshot("client", &client.sim);
                         let _ = client.tx.send(SessionEvent::Started);
                     }
-                    NetMsg::TickBatch { tick, cmds } => { client.apply_batch(tick, cmds)?; }
+                    NetMsg::TickBatch { tick, cmds } => { client.apply_batch(tick, cmds)?; register_snapshot("client", &client.sim); }
                     NetMsg::SyncDigest { tick, digest, .. } => { client.check_digest(tick, digest); }
                     NetMsg::Pause { paused } => { client.paused = paused; let _ = client.tx.send(SessionEvent::Pause { paused }); }
                     NetMsg::Pong { t_millis } => { let _ = client.tx.send(SessionEvent::Pong { rtt_millis: now_millis() - t_millis }); }
@@ -1462,6 +1548,7 @@ pub async fn client_run(
                     client.next_tick = snapshot.tick + 1;
                     client.ring.clear();
                     client.digest_mute = DIGEST_WINDOW as u64;
+                    register_snapshot("client", &client.sim);
                     let _ = client.tx.send(SessionEvent::Resynced { tick: snapshot.tick });
                 }
                     other => { let _ = client.tx.send(SessionEvent::Hello { wire_version: 0, proto: 0, name: format!("{other:?}") }); }
