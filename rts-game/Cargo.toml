@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/shared", "crates/game", "crates/server", "crates/client", "crates/render", "crates/ui"]
+members = ["crates/shared", "crates/net", "crates/game", "crates/server", "crates/client", "crates/render", "crates/ui"]
 resolver = "2"
 
 [workspace.package]
@@ -9,6 +9,11 @@ license = "MIT OR Apache-2.0"
 
 # Path deps on the iron-sim engine. Contract: docs/engine-api.md.
 [workspace.dependencies]
+quinn = "0.11.12"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rcgen = "0.13.2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "macros", "sync", "io-util"] }
+
 engine-core = { path = "../engine/crates/core" }
 engine-ecs = { path = "../engine/crates/ecs" }
 engine-path = { path = "../engine/crates/path" }
