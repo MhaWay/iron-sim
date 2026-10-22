@@ -2,6 +2,20 @@
 name = "client"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Interactive GUI: menu, colony screen, live playing view (eframe)"
+
+[[bin]]
+name = "colony"
+path = "src/main.rs"
 
 [dependencies]
 shared = { path = "../shared" }
+sim = { path = "../sim" }
+engine-core = { workspace = true }
+engine-ecs = { workspace = true }
+engine-path = { workspace = true }
+eframe = "0.37"
+egui = "0.37"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
