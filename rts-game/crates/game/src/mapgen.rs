@@ -140,6 +140,7 @@ fn man(x: i16, y: i16) -> i16 {
 }
 
 /// Base centers: p0 -> (14,14); p1 -> rot180 = (113,113) on 128 (matches legacy TC anchors).
+/// Base-center coords for player count (symmetric corner anchors; legacy maps use (14,14)/(113,113)).
 pub fn base_centers(n: u16) -> Vec<(i16, i16)> {
     let m = n - 1;
     vec![(14, 14), ((m - 14) as i16, (m - 14) as i16)]

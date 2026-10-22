@@ -19,13 +19,33 @@ fn main() {
         }
         let _ = sim.step(&cmds);
         if tick % 32400 == 0 {
-            println!("t={} units={} p0F={} p1F={} p0W={} p1W={}", tick, sim.alive_units(), sim.players[0].stock.food, sim.players[1].stock.food, sim.players[0].stock.wood, sim.players[1].stock.wood);
+            println!(
+                "t={} units={} p0F={} p1F={} p0W={} p1W={}",
+                tick,
+                sim.alive_units(),
+                sim.players[0].stock.food,
+                sim.players[1].stock.food,
+                sim.players[0].stock.wood,
+                sim.players[1].stock.wood
+            );
         }
         if sim.players[0].winner != 0 {
-            println!("end tick={} winner={} hash={:016X}", sim.tick(), sim.players[0].winner, sim.hash());
+            println!(
+                "end tick={} winner={} hash={:016X}",
+                sim.tick(),
+                sim.players[0].winner,
+                sim.hash()
+            );
             break;
         }
     }
     let secs = t0.elapsed().as_secs_f64();
-    println!("units={} cmds={} hash={:016X} ms={:.0} ticks/s={:.0}", sim.alive_units(), total_cmds, sim.hash(), secs * 1000.0, ticks as f64 / secs);
+    println!(
+        "units={} cmds={} hash={:016X} ms={:.0} ticks/s={:.0}",
+        sim.alive_units(),
+        total_cmds,
+        sim.hash(),
+        secs * 1000.0,
+        ticks as f64 / secs
+    );
 }

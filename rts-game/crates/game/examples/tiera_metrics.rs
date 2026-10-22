@@ -101,14 +101,18 @@ fn main() {
                         ));
                     }
                     if t == 8 {
-                        let (x, y) = if p == 0 { (21, 21) } else { (108, 108) };
+                        // Preset-aware build anchors: base-center + 7 offset (same for both sides by rotation symmetry)
+                        let (bx, by) = game::mapgen::base_centers(2)[p as usize];
+                        // Farm anchored 7 tiles inside each base corner (rot180-symmetric about map center).
+                        let (x, y) = (bx + 7, by + 7);
                         cmds.push((p, shared::Command::Build { building: 1, x, y }));
                     }
                     if t == 40 {
-                        let (x, y) = if p == 0 { (25, 18) } else { (104, 111) };
+                        let (x, y) = if p == 0 { (25, 18) } else { (102, 109) };
                         cmds.push((p, shared::Command::Build { building: 3, x, y }));
                     }
                     if t == 70 {
+                        // Wall anchors are exact rot180 mirrors (45,45) <-> (82,82); (83,83) kept per legacy
                         let (x, y) = if p == 0 { (45, 45) } else { (83, 83) };
                         cmds.push((p, shared::Command::Build { building: 8, x, y }));
                     }
@@ -190,5 +194,5 @@ fn main() {
             wdc
         );
     }
-    println!("attr = (init - alive)/init; fairness = avg |init_p0 - init_p1| (expect 0); winners by tick 36000 score cap or elimination");
+    println!("attr = (init - alive)/init; fairness = avg |init_p0 - init_p1| (expect 0); winners by tick 36000 score cap or elimination (w=1 -> p0, w=2 -> p1)");
 }
