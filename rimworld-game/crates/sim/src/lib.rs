@@ -8,6 +8,6 @@ pub mod colony;
 pub use colony::{run_colony, state_hash, ColonySim, SimError};
 
 /// Bump deliberately on intentional sim-math changes.
-pub const SIM_VERSION: u32 = 1;
+pub const SIM_VERSION: u32 = 2;
 /// Fixed tick rate. The host owns the clock; the sim only advances ticks.
 pub const TICK_HZ: u64 = 30;

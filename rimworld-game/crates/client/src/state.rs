@@ -33,10 +33,7 @@ impl Default for Config {
 impl Config {
     pub fn valid(&self) -> bool {
         self.seed != 0
-            && matches!(
-                self.locale.as_str(),
-                "en" | "it" | "es" | "de" | "fr"
-            )
+            && matches!(self.locale.as_str(), "en" | "it" | "es" | "de" | "fr")
             && self.difficulty < 3
     }
 }

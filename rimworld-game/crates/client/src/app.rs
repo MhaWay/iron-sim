@@ -6,10 +6,10 @@
 use crate::game::{alert_label, BuildKind, Preset, Session};
 use crate::i18n::*;
 use crate::save::{self, SaveGame};
-use crate::state::{Config, Screen, UiState};
 use crate::save_io;
-use engine_ecs::Entity;
+use crate::state::{Config, Screen, UiState};
 use eframe::egui::{self, Button, Color32, ComboBox, RichText};
+use engine_ecs::Entity;
 use shared::Command;
 use sim::colony::{Job, Mode, Needs, Pawn, Pos, Site};
 
@@ -118,7 +118,10 @@ impl UiApp {
             }
             ui.add_space(12.0);
             if ui
-                .add(Button::new(RichText::new(CONTINUE.t(&locale)).size(20.0)).min_size(egui::vec2(400.0, 48.0)))
+                .add(
+                    Button::new(RichText::new(CONTINUE.t(&locale)).size(20.0))
+                        .min_size(egui::vec2(400.0, 48.0)),
+                )
                 .clicked()
             {
                 match load_save() {
@@ -132,7 +135,10 @@ impl UiApp {
             }
             ui.add_space(12.0);
             if ui
-                .add(Button::new(RichText::new(EXIT.t(&locale)).size(20.0)).min_size(egui::vec2(400.0, 48.0)))
+                .add(
+                    Button::new(RichText::new(EXIT.t(&locale)).size(20.0))
+                        .min_size(egui::vec2(400.0, 48.0)),
+                )
                 .clicked()
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -173,7 +179,11 @@ impl UiApp {
                         .selected_text(Preset::label(self.state.cfg.preset))
                         .show_ui(ui, |ui| {
                             for p in Preset::all() {
-                                ui.selectable_value(&mut self.state.cfg.preset, p, Preset::label(p));
+                                ui.selectable_value(
+                                    &mut self.state.cfg.preset,
+                                    p,
+                                    Preset::label(p),
+                                );
                             }
                         });
                 });
@@ -181,7 +191,10 @@ impl UiApp {
                     ui.label(RichText::new(DIFFICULTY.t(&locale)).strong());
                     for i in 0..3u8 {
                         let name = ["easy", "normal", "hard"][i as usize];
-                        if ui.selectable_value(&mut self.state.cfg.difficulty, i, name).clicked() {
+                        if ui
+                            .selectable_value(&mut self.state.cfg.difficulty, i, name)
+                            .clicked()
+                        {
                             break;
                         }
                     }
@@ -189,7 +202,11 @@ impl UiApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(MODE_L.t(&locale)).strong());
                     ui.selectable_value(&mut self.state.cfg.sandbox, true, SANDBOX_MODE.t(&locale));
-                    ui.selectable_value(&mut self.state.cfg.sandbox, false, CAMPAIGN_MODE.t(&locale));
+                    ui.selectable_value(
+                        &mut self.state.cfg.sandbox,
+                        false,
+                        CAMPAIGN_MODE.t(&locale),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(SEED.t(&locale)).strong());
@@ -216,8 +233,12 @@ impl UiApp {
                 }
                 ui.add_space(24.0);
                 let b = ui.add(
-                    Button::new(RichText::new(PLAY_BTN.t(&locale)).size(24.0).color(Color32::GOLD))
-                        .min_size(egui::vec2(280.0, 64.0)),
+                    Button::new(
+                        RichText::new(PLAY_BTN.t(&locale))
+                            .size(24.0)
+                            .color(Color32::GOLD),
+                    )
+                    .min_size(egui::vec2(280.0, 64.0)),
                 );
                 if b.clicked() {
                     start_req = true;
@@ -299,7 +320,11 @@ impl UiApp {
                     }
                 }
                 if let Some((msg, ok)) = self.save_feedback.clone() {
-                    let c = if ok { Color32::from_rgb(90, 200, 90) } else { Color32::YELLOW };
+                    let c = if ok {
+                        Color32::from_rgb(90, 200, 90)
+                    } else {
+                        Color32::YELLOW
+                    };
                     ui.colored_label(c, msg);
                 }
                 for a in alerts {
@@ -357,7 +382,11 @@ impl UiApp {
                 }
                 for (id, assigned) in job_rows.iter().take(12) {
                     ui.horizontal(|ui| {
-                        ui.label(format!("#{} {}", id, if *assigned { "assigned" } else { "open" }));
+                        ui.label(format!(
+                            "#{} {}",
+                            id,
+                            if *assigned { "assigned" } else { "open" }
+                        ));
                         if !assigned && ui.button(ASSIGN.t(&locale)).clicked() {
                             if let Some(s) = self.session.as_mut() {
                                 if let Some(pawn) = s.pick_unassigned_pawn() {
@@ -382,7 +411,8 @@ impl UiApp {
                 for (id, mode) in pawns.iter().take(8) {
                     let is_sel = self.selected_pawn == Some(*id);
                     ui.horizontal(|ui| {
-                        let mut btn = Button::new(format!("{} #{}", mode, id)).min_size(egui::vec2(150.0, 22.0));
+                        let mut btn = Button::new(format!("{} #{}", mode, id))
+                            .min_size(egui::vec2(150.0, 22.0));
                         if is_sel {
                             btn = btn.fill(Color32::from_rgb(50, 90, 150));
                         }
@@ -415,7 +445,8 @@ impl UiApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             let Some(s) = &self.session else { return };
-            let mut grid: Vec<Color32> = vec![Color32::from_rgb(38, 66, 40); (MAP as usize) * (MAP as usize)];
+            let mut grid: Vec<Color32> =
+                vec![Color32::from_rgb(38, 66, 40); (MAP as usize) * (MAP as usize)];
             for (_, sit) in s.sim.world.storages.iter::<Site>() {
                 let t = sit.tile;
                 if sit.kind == 1 {
@@ -499,7 +530,11 @@ impl UiApp {
     }
     fn issue_move(&mut self, tile: (i16, i16)) {
         if let (Some(s), Some(pawn)) = (self.session.as_mut(), self.selected_pawn) {
-            s.issue(Command::Move { pawn, x: tile.0, y: tile.1 });
+            s.issue(Command::Move {
+                pawn,
+                x: tile.0,
+                y: tile.1,
+            });
         }
     }
 }
@@ -521,6 +556,7 @@ fn mode_label(s: &Session, id: u32, locale: &str) -> String {
             Mode::Eat { .. } => EATING.t(locale).to_string(),
             Mode::Sleep { .. } => SLEEPING.t(locale).to_string(),
             Mode::Work { .. } => WORKING.t(locale).to_string(),
+            Mode::Attack { .. } => ATTACKING.t(locale).to_string(),
         },
     }
 }

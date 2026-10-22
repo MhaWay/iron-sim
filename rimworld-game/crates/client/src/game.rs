@@ -107,6 +107,9 @@ impl Session {
     pub fn new(seed: u64, preset: Preset, sandbox: bool, difficulty: u8) -> Session {
         let mut sim = ColonySim::new(seed);
         preset.setup(&mut sim);
+        // Campaign mode is simulated by the sim (raid cadence + combat); sandbox keeps the sim
+        // completely raid-free (no events, no rng consumption). Set BEFORE the first step.
+        sim.set_config(!sandbox, difficulty);
         Session {
             sim,
             seed,
@@ -123,13 +126,14 @@ impl Session {
 
     /// Rebuild from a decoded save (used by tests): canonical batches + live queue = 0.
     pub fn from_replay(
-        sim: ColonySim,
+        mut sim: ColonySim,
         seed: u64,
         preset: Preset,
         sandbox: bool,
         difficulty: u8,
         batches: &[TickCommands],
     ) -> Session {
+        sim.set_config(!sandbox, difficulty);
         let mut s = Session {
             sim,
             seed,
@@ -178,10 +182,15 @@ impl Session {
     /// Issue build command from toolbar mode.
     pub fn issue_build(&mut self, kind: BuildKind, x: i16, y: i16) {
         let k: u8 = match kind {
-            BuildKind::Shelf | BuildKind::Farm => 0,
+            BuildKind::Shelf => 0,
             BuildKind::Bed | BuildKind::WorkZone => 1,
+            BuildKind::Farm => 2,
         };
-        self.issue(Command::Build { tile: x, y, kind: k });
+        self.issue(Command::Build {
+            tile: x,
+            y,
+            kind: k,
+        });
     }
 
     /// First pawn with an idle mode and no job claim (for the "Assign" quick action).
@@ -201,7 +210,11 @@ impl Session {
                 .storages
                 .iter::<sim::colony::Site>()
                 .any(|(_, st)| st.occupied_by == Some(e.0));
-            let on_job = s.world.storages.iter::<sim::colony::Job>().any(|(_, j)| j.assigned == Some(e.0) && !j.done);
+            let on_job = s
+                .world
+                .storages
+                .iter::<sim::colony::Job>()
+                .any(|(_, j)| j.assigned == Some(e.0) && !j.done);
             if !claimed && !on_job {
                 best = Some(e.0);
                 break;
@@ -237,12 +250,21 @@ impl Session {
             out.push(AlertKind::Exhaust);
         }
         if !self.sandbox {
+            // Disease: flavor cadence, weaker at higher difficulty.
             let t = self.sim.world.tick;
             let diff = self.difficulty.max(1) as u64;
             if t > 600 && (t % (2400 / diff)) < 30 {
                 out.push(AlertKind::Disease);
             }
-            if t > 1200 && (t % (4800 / diff)) < 30 {
+            // Raid: fired straight from SIM state (campaign raid system owns this event);
+            // sandbox never gets here and the sim can't produce raiders there either.
+            let raiders = self
+                .sim
+                .world
+                .storages
+                .iter::<sim::colony::Pawn>()
+                .any(|(_, p)| p.hostile);
+            if raiders {
                 out.push(AlertKind::Raid);
             }
             let _ = idle_needs;
@@ -252,10 +274,11 @@ impl Session {
 
     /// Commands for the save file: canonical per-tick batches up to current tick.
     pub fn live_batches_snapshot(&self) -> Vec<crate::save::WireBatch> {
-        self.history.iter().map(crate::save::batch_to_wire).collect()
+        self.history
+            .iter()
+            .map(crate::save::batch_to_wire)
+            .collect()
     }
-
-
 
     /// Build a live session from a decoded save: replay the command log against a fresh
     /// deterministic-preset sim, then continue from that point. History is restored too, so
@@ -264,12 +287,15 @@ impl Session {
         let preset = Preset::from_index(sg.preset);
         let mut sim = ColonySim::new(sg.seed);
         preset.setup(&mut sim);
+        sim.set_config(!sg.sandbox, sg.difficulty);
         let mut history: Vec<TickCommands> = sg
             .batches
             .iter()
             .map(crate::save::batch_from_wire)
             .collect();
-        let max_tick = sg.ticks.max(sg.batches.iter().map(|b| b.tick + 1).max().unwrap_or(0));
+        let max_tick = sg
+            .ticks
+            .max(sg.batches.iter().map(|b| b.tick + 1).max().unwrap_or(0));
         while history.len() < max_tick as usize {
             history.push(TickCommands {
                 tick: history.len() as u64,
@@ -311,7 +337,11 @@ impl Session {
             .map(|j| j.site);
         self.issue(Command::Wait { pawn });
         if let Some(t) = site {
-            self.issue(Command::Move { pawn, x: t.x, y: t.y });
+            self.issue(Command::Move {
+                pawn,
+                x: t.x,
+                y: t.y,
+            });
         }
     }
 }

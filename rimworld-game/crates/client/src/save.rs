@@ -85,17 +85,18 @@ pub fn replay(s: &SaveGame) -> sim::ColonySim {
         .max(s.batches.iter().map(|b| b.tick + 1).max().unwrap_or(0));
     let mut idx = 0usize;
     while sim.world.tick < max_tick {
-        let cmds: Vec<(u32, Command)> = if idx < s.batches.len() && s.batches[idx].tick == sim.world.tick {
-            let c = s.batches[idx]
-                .cmds
-                .iter()
-                .map(|(p, c)| (*p, from_wire(c)))
-                .collect();
-            idx += 1;
-            c
-        } else {
-            Vec::new()
-        };
+        let cmds: Vec<(u32, Command)> =
+            if idx < s.batches.len() && s.batches[idx].tick == sim.world.tick {
+                let c = s.batches[idx]
+                    .cmds
+                    .iter()
+                    .map(|(p, c)| (*p, from_wire(c)))
+                    .collect();
+                idx += 1;
+                c
+            } else {
+                Vec::new()
+            };
         if sim.step(&cmds).is_err() {
             break;
         }
@@ -119,7 +120,14 @@ mod tests {
             ticks: 9,
             batches: vec![WireBatch {
                 tick: 4,
-                cmds: vec![(0, WireCommand::Move { pawn: 1, x: 2, y: 3 })],
+                cmds: vec![(
+                    0,
+                    WireCommand::Move {
+                        pawn: 1,
+                        x: 2,
+                        y: 3,
+                    },
+                )],
             }],
         };
         let b = encode(&s);
@@ -131,11 +139,30 @@ mod tests {
     fn replay_matches_two_run_headless() {
         let seed = 777u64;
         let mut batches: Vec<WireBatch> = (0..160u64)
-            .map(|t| WireBatch { tick: t, cmds: vec![] })
+            .map(|t| WireBatch {
+                tick: t,
+                cmds: vec![],
+            })
             .collect();
-        batches[5].cmds.push((0, WireCommand::Build { tile: 10, y: 11, kind: 0 }));
-        batches[30].cmds.push((0, WireCommand::Move { pawn: 0, x: 10, y: 10 }));
-        let h = run_colony(seed, 160, &denses(), |s| crate::game::Preset::Homestead.setup(s));
+        batches[5].cmds.push((
+            0,
+            WireCommand::Build {
+                tile: 10,
+                y: 11,
+                kind: 0,
+            },
+        ));
+        batches[30].cmds.push((
+            0,
+            WireCommand::Move {
+                pawn: 0,
+                x: 10,
+                y: 10,
+            },
+        ));
+        let h = run_colony(seed, 160, &denses(), |s| {
+            crate::game::Preset::Homestead.setup(s)
+        });
         let save = SaveGame {
             version: SAVE_VERSION,
             seed,
@@ -153,9 +180,23 @@ mod tests {
         (0..160u64)
             .map(|t| {
                 let cmds = if t == 5 {
-                    vec![(0, Command::Build { tile: 10, y: 11, kind: 0 })]
+                    vec![(
+                        0,
+                        Command::Build {
+                            tile: 10,
+                            y: 11,
+                            kind: 0,
+                        },
+                    )]
                 } else if t == 30 {
-                    vec![(0, Command::Move { pawn: 0, x: 10, y: 10 })]
+                    vec![(
+                        0,
+                        Command::Move {
+                            pawn: 0,
+                            x: 10,
+                            y: 10,
+                        },
+                    )]
                 } else {
                     vec![]
                 };
