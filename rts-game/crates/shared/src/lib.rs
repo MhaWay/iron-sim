@@ -8,6 +8,7 @@
 //! (design doc docs/design-factions.md §6; Phase-2 variants are structure-only, no sim behavior).
 
 /// Canonical fixed-point alias (engine-core is the source of truth).
+pub mod netcode;
 pub type Fixed = engine_core::Fixed1616;
 
 /// Resource enum for Gather. Canonical numeric order: Food, Wood, Gold, Mana.
