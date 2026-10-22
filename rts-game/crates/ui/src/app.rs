@@ -860,7 +860,6 @@ impl UiApp {
                             building: kind,
                             x: tx,
                             y: ty,
-                            level: 1,
                         });
                         self.pending_place = None;
                     } else {
