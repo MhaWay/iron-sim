@@ -108,11 +108,11 @@ fn golden_hash_check() {
     // Never "fix" CI by nudging this number.
     let stream = build_command_stream();
     let h = run_sim(12345, 120, &stream);
-    // v3 golden (2026-10-21): re-baselined after the intentional AoE-loop change (SIM_VERSION 2->3):
-    // age timers/costs, pop caps + train gates, RallyPoint/UnitRally hash fields, Wall/Factory kinds,
-    // destructible-building combat, victory_check. Regenerated cross-process via examples/golden_dump.rs
-    // (two independent release-binary runs agreed).
-    let golden: u64 = 17612980411304077458; // 0xF46D_E05D_D3B1_6892 (SIM_VERSION=3, AoE loop). Refresh deliberately on intentional sim-math change — bump SIM_VERSION first.
+    // v4 golden (2026-10-22): re-baselined after Tier A long-match mechanics (SIM_VERSION 3->4):
+    // node regen (food +2/50t, wood +1/150t, gold none, capped) + army upkeep/starvation
+    // (grace 600t, per-kind food tables, 1 hp starvation floor, -2 speed_q slow). Regenerated
+    // cross-process via examples/golden_dump.rs (two independent release-binary runs agreed).
+    let golden: u64 = 10775104203620283299; // 0x9588_DC2F_2A9A_F3A3 (SIM_VERSION=4, Tier A1+A2). Refresh deliberately on intentional sim-math change — bump SIM_VERSION first.
     println!("current={:016x} golden={:016x}", h, golden);
     assert_eq!(h, golden, "golden hash mismatch — if sim math changed intentionally, bump SIM_VERSION and update this line");
 }

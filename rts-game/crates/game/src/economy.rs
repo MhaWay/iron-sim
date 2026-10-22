@@ -41,6 +41,22 @@ pub const AGE_COST: [[i64; 3]; 4] = [[0, 0, 0], [300, 150, 0], [600, 350, 250], 
 /// Tick budget for the score win (20 min @ 30 Hz).
 pub const MATCH_TICKS: u64 = 36000;
 
+/// v4 (Tier A1): upkeep interval in ticks — army upkeep is charged every UPKEEP_INTERVAL.
+/// First UPKEEP_GRACE ticks are exempt (early game untouched).
+pub const UPKEEP_INTERVAL: u64 = 150;
+pub const UPKEEP_GRACE: u64 = 600;
+/// v4 (Tier A1): food upkeep per unit kind (Serf, Militia, Archer, Knight, Siege).
+/// Symmetric across players; charged per UPKEEP_INTERVAL per living unit owned.
+pub const UPKEEP: [i64; 5] = [0, 1, 1, 3, 4];
+/// v4 (Tier A1): starvation — unit loses 1 hp per interval while the owner is food-negative;
+/// units at 1 hp are never killed by starvation, instead they lose STARVE_SLOW per interval
+/// (speed_q saturating floor 1) so they keep walking.
+pub const STARVE_SLOW: u32 = 2;
+/// v4 (Tier A2): node regeneration — food +2 per 50 ticks, wood +1 per 150 ticks, gold none,
+/// always capped at the node's original total. Slot-indexed (food 0, wood 1, gold 2).
+pub const REGEN_INTERVAL: [u64; 3] = [50, 150, 0];
+pub const REGEN_AMOUNT: [i64; 3] = [2, 1, 0];
+
 /// Canonical per-resource storage: fields indexed by the resource slot, NEVER a hashmap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resources {

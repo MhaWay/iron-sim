@@ -41,3 +41,11 @@ v2 golden 0x73FF5F0F7980D4A1. The Rust v3 (AoE loop, victory_check, age timers) 
 never ported to C++ — 9aac02c only regenerated the Rust-side oracle JSON. Before any
 SIM_VERSION bump, decide: (a) port v3 (+v4) systems to C++ and bump its SIM_VERSION,
 or (b) relax C++ stream-parity. mapgen work avoids this by not touching Sim::new.
+
+
+## v4 shipping note (2026-10-22)
+- SIM_VERSION=4, golden re-baselined: 0x9588_DC2F_2A9A_F3A3 (10775104203620283299).
+- Rust oracle JSON regenerated via simcpp/oracle/dump_rts (golden 10775104203620283299,
+  economy vector re-run). v3+ stream parity is NOT ported to C++ — C++ test binaries
+  pin the v2 legacy golden only and are labeled "legacy v2 oracle cross-check". Rust
+  binaries are the delivery products.

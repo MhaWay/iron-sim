@@ -18,7 +18,7 @@ pub use sim::{run_sim, Sim, SimError};
 ///   building-destroyable combat (Wreck status), victory_check (TC kill / MATCH_TICKS score), and
 ///   PlayerState age/score/winner fields. All hash-visible; golden stream re-baselined in
 ///   tests/determinism.rs. Command wire format unchanged (tags 1-10).
-pub const SIM_VERSION: u32 = 3;
+pub const SIM_VERSION: u32 = 4;
 /// Fixed tick rate. The host (server/client) owns the clock; the sim only advances ticks.
 pub const TICK_HZ: u64 = 30;
 

@@ -13,7 +13,8 @@ use crate::economy::{
     building_spec, harvest_score_inc, pop_cap_for, train_gate, unit_spec, Building, BuildingStatus,
     HarvestState, NodePos, PlayerState, RallyPoint, ResourceNode, TrainItem, TrainQueue, UnitRally,
     Visibility, WorkJob, WorkMode, AGE_COST, AGE_UP_TICKS, CARRY, MAP_H, MAP_W, MATCH_TICKS,
-    PICK_TICKS, SIGHT_BASE, UNIT_KIND_COUNT,
+    PICK_TICKS, REGEN_AMOUNT, REGEN_INTERVAL, SIGHT_BASE, STARVE_SLOW, UNIT_KIND_COUNT, UPKEEP,
+    UPKEEP_GRACE, UPKEEP_INTERVAL,
 };
 use crate::SIM_VERSION;
 
@@ -370,6 +371,14 @@ impl Sim {
                 }
             }
         }
+        // v4 (Tier A2): node regeneration — state-driven, no RNG; entity order keeps it fixed.
+        if tick.is_multiple_of(50) {
+            self.regen_nodes();
+        }
+        // v4 (Tier A1): army upkeep + starvation after UPKEEP_GRACE, every UPKEEP_INTERVAL.
+        if tick.is_multiple_of(UPKEEP_INTERVAL) && tick > UPKEEP_GRACE {
+            self.tick_upkeep();
+        }
         // v2: win check — enemy TownCenter destroyed OR 20-min score cap. Runs AFTER systems so
         // destroyed buildings are settled; both players' winner flags update atomically.
         self.victory_check();
@@ -425,6 +434,84 @@ impl Sim {
             };
             self.players[0].winner = w;
             self.players[1].winner = w;
+        }
+    }
+
+    /// v4 (Tier A2): deterministic node regen. Food +2 / 50 ticks, wood +1 / 150 ticks,
+    /// gold none; capped at the node's total. Called every 50 ticks (wood gates by %150).
+    /// Entity order iteration keeps the state hash fixed across replays.
+    fn regen_nodes(&mut self) {
+        let tick = self.world.tick;
+        let nodes: Vec<(Entity, u8, i64)> = self
+            .world
+            .storages
+            .iter::<ResourceNode>()
+            .map(|(e, n)| (e, n.slot, n.total))
+            .collect();
+        for (e, slot, total) in nodes {
+            let (iv, amt) = match slot {
+                0 => (REGEN_INTERVAL[0], REGEN_AMOUNT[0]),
+                1 => (REGEN_INTERVAL[1], REGEN_AMOUNT[1]),
+                2 => (REGEN_INTERVAL[2], REGEN_AMOUNT[2]),
+                _ => continue,
+            };
+            if iv == 0 || amt == 0 {
+                continue;
+            }
+            if !tick.is_multiple_of(iv) {
+                continue;
+            }
+            let cur = match self.world.storages.get::<ResourceNode>(e) {
+                Some(n) => n.remaining,
+                None => continue,
+            };
+            if cur >= total {
+                continue;
+            }
+            if let Some(n) = self.world.storages.get_mut::<ResourceNode>(e) {
+                n.remaining = (cur + amt).min(total);
+            }
+        }
+    }
+
+    /// v4 (Tier A1): army upkeep. Every UPKEEP_INTERVAL (after UPKEEP_GRACE grace ticks) each
+    /// player pays SUM(UPKEEP[kind] per living unit) food. If their stock is negative after the
+    /// drain, all their units take 1 starvation hp per interval (entity order); units at 1 hp
+    /// are never killed by starvation — they take STARVE_SLOW speed penalty (floor 1) instead.
+    /// Symmetric table: no player advantage.
+    fn tick_upkeep(&mut self) {
+        let mut units_by_owner: Vec<Vec<(Entity, u16)>> = vec![Vec::new(); self.players.len()];
+        for (e, u) in self.world.storages.iter::<Unit>() {
+            if (u.owner as usize) < self.players.len() {
+                units_by_owner[u.owner as usize].push((e, u.kind));
+            }
+        }
+        for (owner, list) in units_by_owner.iter().enumerate() {
+            let mut due: i64 = 0;
+            for (_e, kind) in list {
+                let k = *kind as usize;
+                if k < UPKEEP.len() {
+                    due += UPKEEP[k];
+                }
+            }
+            if due > 0 {
+                // v4: pay what we can; remaining deficit makes the owner food-negative,
+                // which triggers starvation below. `take` alone cannot express this.
+                self.players[owner].stock.food -= due;
+            }
+            if self.players[owner].stock.food < 0 {
+                let mut list: Vec<Entity> = list.iter().map(|(e, _)| *e).collect();
+                list.sort();
+                for e in list {
+                    if let Some(u) = self.world.storages.get_mut::<Unit>(e) {
+                        if u.hp > 1 {
+                            u.hp = u.hp.saturating_sub(1);
+                        } else {
+                            u.speed_q = u.speed_q.saturating_sub(STARVE_SLOW).max(1);
+                        }
+                    }
+                }
+            }
         }
     }
 

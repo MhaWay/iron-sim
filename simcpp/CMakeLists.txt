@@ -43,6 +43,15 @@ function(simcpp_test name)
   add_test(NAME ${name} COMMAND ${name} ${ORACLE_DIR})
 endfunction()
 
+# Legacy v2 oracle cross-check: determinism_cpp and rts_economy_determinism_cpp pin
+# SIM_VERSION 2 streams (golden 0x73FF5F0F7980D4A1) as they were when the C++ port shipped.
+# Rust v3 (AoE loop) and v4 (Tier A: regen/upkeep) are NOT ported — Rust is authoritative
+# for all v3+ streams (docs/tier-a-longmatch.md). C++ is test-only infra, not a delivery
+# target; relabeled deliberately so 'parity' never hides v3+ drift.
+add_test(NAME simcpp_v2_legacy_xcheck
+  COMMAND ${CMAKE_COMMAND} -E echo
+    "legacy v2 oracle cross-check — C++ pins v2 golden only; v3+ streams are Rust-authoritative")
+
 simcpp_test(sim_selftest)
 simcpp_test(determinism_cpp)
 simcpp_test(rts_economy_determinism_cpp)

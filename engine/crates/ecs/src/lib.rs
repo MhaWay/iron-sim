@@ -130,7 +130,7 @@ impl Storages {
         }
     }
 
-        pub fn despawn(&mut self, e: Entity) {
+    pub fn despawn(&mut self, e: Entity) {
         if let Some(i) = self.alive.iter().position(|x| *x == e) {
             self.alive.remove(i);
         }
