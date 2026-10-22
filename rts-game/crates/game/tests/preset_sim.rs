@@ -8,7 +8,14 @@ fn batches(ticks: u64) -> Vec<TickCommands> {
         .map(|t| TickCommands {
             tick: t,
             cmds: if t % 20 == 5 {
-                vec![(0, Command::Move { unit: 3, x: 20, y: 20 })]
+                vec![(
+                    0,
+                    Command::Move {
+                        unit: 3,
+                        x: 20,
+                        y: 20,
+                    },
+                )]
             } else {
                 Vec::new()
             },

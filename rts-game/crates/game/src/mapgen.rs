@@ -112,7 +112,10 @@ impl MapGen {
         let mut bits = vec![0u64; (w * h).div_ceil(64)];
         for y in 0..h {
             for x in 0..w {
-                if self.grid.is_blocked(TilePos { x: x as i16, y: y as i16 }) {
+                if self.grid.is_blocked(TilePos {
+                    x: x as i16,
+                    y: y as i16,
+                }) {
                     bits[(y * w + x) >> 6] |= 1u64 << ((y * w + x) & 63);
                 }
             }
@@ -170,7 +173,6 @@ impl Rng {
         (self.next_u64() % n as u64) as u32
     }
 }
-
 
 struct Ctx {
     n: u16,
@@ -297,13 +299,9 @@ impl Ctx {
         let (ax, ay) = self.base_centers[0];
         let (bx, by) = self.base_centers[1];
         let w = 2 + self.preset.road_w; // road half-width plus slack
-        // mirrored L-path: (ax,ay)->(bx,ay) horizontal then (bx,ay)->(bx,by) vertical
-        let near_h = (y - ay).abs() <= w
-            && x >= ax.min(bx) - w
-            && x <= ax.max(bx) + w;
-        let near_v = (x - bx).abs() <= w
-            && y >= ay.min(by) - w
-            && y <= ay.max(by) + w;
+                                        // mirrored L-path: (ax,ay)->(bx,ay) horizontal then (bx,ay)->(bx,by) vertical
+        let near_h = (y - ay).abs() <= w && x >= ax.min(bx) - w && x <= ax.max(bx) + w;
+        let near_v = (x - bx).abs() <= w && y >= ay.min(by) - w && y <= ay.max(by) + w;
         near_h || near_v
     }
     #[inline]
@@ -328,7 +326,9 @@ impl Ctx {
             let r = self.rng.next_u64();
             let x = (r % n) as i16;
             let y = ((r >> 20) % n) as i16;
-            if self.blocked(x, y) || self.on_road(x, y) || self.taken[self.idx(x, y)]
+            if self.blocked(x, y)
+                || self.on_road(x, y)
+                || self.taken[self.idx(x, y)]
                 || self.near_base(x, y, bases, 1)
             {
                 continue;
@@ -370,7 +370,7 @@ impl Ctx {
             let _ = cells_per_group;
         }
     }
-fn res_band(&self, slot: u8) -> (i16, i16) {
+    fn res_band(&self, slot: u8) -> (i16, i16) {
         match slot {
             0 => (self.preset.gold_lo, self.preset.gold_hi),
             1 => (self.preset.base_r + 2, self.preset.food_hi),
@@ -398,7 +398,8 @@ fn res_band(&self, slot: u8) -> (i16, i16) {
         if !ok {
             return false;
         }
-        if bases.len() == 2 && man(x - bases[1 - b].0, y - bases[1 - b].1) <= self.preset.base_r + 1 {
+        if bases.len() == 2 && man(x - bases[1 - b].0, y - bases[1 - b].1) <= self.preset.base_r + 1
+        {
             return false;
         }
         !self.taken[self.idx(x, y)]
@@ -422,7 +423,13 @@ fn res_band(&self, slot: u8) -> (i16, i16) {
                 }
                 let total = lo as i64 + ((r >> 43) % span) as i64;
                 self.mark_taken(x, y);
-                self.nodes.push(NodePl { slot, x, y, total, base: 0 });
+                self.nodes.push(NodePl {
+                    slot,
+                    x,
+                    y,
+                    total,
+                    base: 0,
+                });
                 got += 1;
             }
             if got < want {
@@ -448,7 +455,13 @@ fn res_band(&self, slot: u8) -> (i16, i16) {
                     }
                     let total = lo as i64 + ((r >> 43) % span) as i64;
                     self.mark_taken(x, y);
-                    self.nodes.push(NodePl { slot, x, y, total, base: 1 });
+                    self.nodes.push(NodePl {
+                        slot,
+                        x,
+                        y,
+                        total,
+                        base: 1,
+                    });
                     got += 1;
                 }
             }
@@ -459,7 +472,13 @@ fn res_band(&self, slot: u8) -> (i16, i16) {
             let (x, y) = rot180(nd.x, nd.y, self.m);
             if self.res_spot_ok(x, y, 1, nd.slot, bases) {
                 self.mark_taken(x, y);
-                self.nodes.push(NodePl { slot: nd.slot, x, y, total: nd.total, base: 1 });
+                self.nodes.push(NodePl {
+                    slot: nd.slot,
+                    x,
+                    y,
+                    total: nd.total,
+                    base: 1,
+                });
             }
         }
     }
@@ -469,7 +488,7 @@ fn res_band(&self, slot: u8) -> (i16, i16) {
         self.taken[i] = true;
     }
 
-fn layer_decor(&mut self, bases: &[(i16, i16)]) {
+    fn layer_decor(&mut self, bases: &[(i16, i16)]) {
         let want = self.preset.decor_count;
         let mut got = 0u32;
         let mut tries = 0u32;
@@ -478,7 +497,11 @@ fn layer_decor(&mut self, bases: &[(i16, i16)]) {
             let r = self.rng.next_u64();
             let x = (r % self.n as u64) as i16;
             let y = ((r >> 23) % self.n as u64) as i16;
-            if !self.in_map(x, y) || self.blocked(x, y) || self.on_road(x, y) || self.taken[self.idx(x, y)] {
+            if !self.in_map(x, y)
+                || self.blocked(x, y)
+                || self.on_road(x, y)
+                || self.taken[self.idx(x, y)]
+            {
                 continue;
             }
             if self.near_base(x, y, bases, 0) {
@@ -568,7 +591,11 @@ fn layer_decor(&mut self, bases: &[(i16, i16)]) {
     fn place_missing(&mut self, b: usize, slot: u8, bases: &[(i16, i16)]) {
         let want = self.res_want(slot);
         let (lo, hi) = self.res_band(slot);
-        let mut have = self.nodes.iter().filter(|n| n.base == b && n.slot == slot && n.total > 0).count() as u32;
+        let mut have = self
+            .nodes
+            .iter()
+            .filter(|n| n.base == b && n.slot == slot && n.total > 0)
+            .count() as u32;
         let mut tries = 0u32;
         while have < want && tries < 16384 {
             tries += 1;
@@ -582,7 +609,13 @@ fn layer_decor(&mut self, bases: &[(i16, i16)]) {
             let total = lo as i64 + ((r >> 43) % span) as i64;
             let i = self.idx(x, y);
             self.taken[i] = true;
-            self.nodes.push(NodePl { slot, x, y, total, base: b });
+            self.nodes.push(NodePl {
+                slot,
+                x,
+                y,
+                total,
+                base: b,
+            });
             have += 1;
         }
     }
@@ -608,8 +641,9 @@ pub fn generate_map_preset(seed: u64, preset: Preset) -> MapGen {
         let mut ctx = Ctx::new(attempt_seed, preset);
         ctx.attempt();
         let (conn, counts) = ctx.validate(&ctx.base_centers);
-        let valid =
-            conn && (0..2).all(|b| (0..3u8).all(|s| counts[b][s as usize] >= preset_res_want(&preset, s)));
+        let valid = conn
+            && (0..2)
+                .all(|b| (0..3u8).all(|s| counts[b][s as usize] >= preset_res_want(&preset, s)));
         if valid {
             return finish(ctx, i + 1);
         }
@@ -673,14 +707,20 @@ impl MapGen {
                 continue;
             }
             let e = world.storages.spawn();
-            world.storages.add(e, ResourceNode { slot: nd.slot, total: nd.total, remaining: nd.total });
+            world.storages.add(
+                e,
+                ResourceNode {
+                    slot: nd.slot,
+                    total: nd.total,
+                    remaining: nd.total,
+                },
+            );
             world.storages.add(e, NodePos { x: nd.x, y: nd.y });
             out.push((e, *nd));
         }
         out
     }
 }
-
 
 /// Deterministic run: create Sim::new(seed), install the preset map, then step with cmds.
 /// Returns the final state hash. Preset maps are deterministic per (seed, preset).

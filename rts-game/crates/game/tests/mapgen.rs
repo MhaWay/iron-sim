@@ -18,7 +18,12 @@ fn gen_smoke_all_presets() {
 fn digest_determinism_100x() {
     for p in PRESETS {
         for seed in 0..100u64 {
-            assert_eq!(gen(seed, p).map_digest(), gen(seed, p).map_digest(), "seed {}", seed);
+            assert_eq!(
+                gen(seed, p).map_digest(),
+                gen(seed, p).map_digest(),
+                "seed {}",
+                seed
+            );
         }
     }
 }
@@ -31,7 +36,10 @@ fn symmetry_rot180() {
             for y in 0..128i16 {
                 for x in 0..128i16 {
                     let b1 = m.grid.is_blocked(engine_path::TilePos { x, y });
-                    let b2 = m.grid.is_blocked(engine_path::TilePos { x: 127 - x, y: 127 - y });
+                    let b2 = m.grid.is_blocked(engine_path::TilePos {
+                        x: 127 - x,
+                        y: 127 - y,
+                    });
                     assert_eq!(b1, b2, "sym fail seed {} cell {} {}", seed, x, y);
                 }
             }
@@ -44,7 +52,11 @@ fn counts(m: &MapGen) -> ([u32; 3], [u32; 3]) {
     let mut c2 = [0u32; 3];
     for nd in &m.nodes {
         if nd.total > 0 {
-            if nd.base == 0 { c1[nd.slot as usize] += 1 } else { c2[nd.slot as usize] += 1 }
+            if nd.base == 0 {
+                c1[nd.slot as usize] += 1
+            } else {
+                c2[nd.slot as usize] += 1
+            }
         }
     }
     (c1, c2)
@@ -76,7 +88,10 @@ fn connected(m: &MapGen) -> bool {
         head += 1;
         for (dx, dy) in [(1i16, 0i16), (-1, 0), (0, 1), (0, -1)] {
             let (nx, ny) = (x + dx, y + dy);
-            if nx >= 0 && ny >= 0 && (nx as usize) < 128 && (ny as usize) < 128
+            if nx >= 0
+                && ny >= 0
+                && (nx as usize) < 128
+                && (ny as usize) < 128
                 && !m.grid.is_blocked(engine_path::TilePos { x: nx, y: ny })
                 && !seen[(ny as usize) * 128 + (nx as usize)]
             {
@@ -102,13 +117,19 @@ fn metrics_print() {
             let t1 = std::time::Instant::now();
             let m = gen(seed, preset);
             let ms = t1.elapsed().as_secs_f64() * 1e3;
-            if ms > max_ms { max_ms = ms }
+            if ms > max_ms {
+                max_ms = ms
+            }
             total_ms += ms;
             n += 1;
             attempts_sum += m.attempts as u64;
-            if m.repaired != 0 { repairs += 1 }
+            if m.repaired != 0 {
+                repairs += 1
+            }
             let (c1, c2) = counts(&m);
-            for s2 in 0..3 { fair_sum += c1[s2].abs_diff(c2[s2]); }
+            for s2 in 0..3 {
+                fair_sum += c1[s2].abs_diff(c2[s2]);
+            }
         }
         println!(
             "PRESET {}: ms/seed={:.3} (max={:.3}) first_draw_rate={:.4} repairs={} fairness_sum={} attempts_sum={}",

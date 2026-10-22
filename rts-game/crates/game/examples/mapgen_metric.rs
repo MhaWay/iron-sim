@@ -7,7 +7,10 @@ fn gen(seed: u64, p: &Preset) -> game::mapgen::MapGen {
 }
 
 fn main() {
-    let n: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1000);
+    let n: u64 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
     println!("preset,seeds,ms_per_seed,max_ms,first_draw_pass_rate,repairs,fairness_delta");
     for preset in PRESETS.iter() {
         let mut ms_sum = 0f64;

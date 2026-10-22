@@ -24,9 +24,14 @@ Requisiti chiave:
 ```bash
 source /root/.cargo/env
 cd engine && cargo test --workspace            # 17 green
-cd ../rts-game && cargo test --workspace       # 12 green
+cd ../rts-game && cargo test --workspace       # 25 green (incl. game-ui headless suite)
 cd ../rimworld-game && cargo test --workspace  # 9 green
 ```
+
+## Launcher
+Native game UI (eframe): `cd rts-game && cargo run -p game-ui` launches
+`iron-sim` with a main menu and the custom-match screen. Windows cross-build:
+see [docs/windows-build.md](docs/windows-build.md).
 `cargo fmt --check` e `cargo clippy --all-targets -D warnings` puliti.
 
 ## Note

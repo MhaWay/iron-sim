@@ -1,0 +1,20 @@
+[package]
+name = "game-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Interactive GUI: main menu, custom-match screen, live match view (eframe)"
+
+[[bin]]
+name = "iron-sim"
+path = "src/main.rs"
+
+[dependencies]
+shared = { path = "../shared" }
+game = { path = "../game" }
+render = { path = "../render" }
+engine-ecs = { workspace = true }
+engine-core = { workspace = true }
+engine-path = { workspace = true }
+eframe = "0.37"
+egui = "0.37"

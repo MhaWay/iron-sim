@@ -1,28 +1,32 @@
-# Building for Windows (from Linux)
+# Windows build (cross-compile)
 
-Cross-compilation target: x86_64-pc-windows-gnu.
+The launcher `iron-sim` (crates/ui) cross-builds from Linux to Windows via the
+`x86_64-pc-windows-gnu` target and a mingw-w64 toolchain.
 
-## Toolchain (one-time)
-    sudo apt-get install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
-    rustup target add x86_64-pc-windows-gnu
+Prereqs (Debian/Ubuntu host):
 
-The workspace .cargo/config.toml pins the mingw linker for that target.
+```bash
+sudo apt-get install -y mingw-w64
+rustup target add x86_64-pc-windows-gnu
+```
 
-## Build
-    cd rts-game
-    cargo build --release --target x86_64-pc-windows-gnu --bins --examples
-    # artifacts: target/x86_64-pc-windows-gnu/release/{demo_v2,server,client,simdemo,bench}.exe
-    cd ../rimworld-game
-    cargo build --release --target x86_64-pc-windows-gnu --bins
-    # artifacts: target/x86_64-pc-windows-gnu/release/{server,client}.exe
+Linker pin (already committed in `rts-game/.cargo/config.toml`):
 
-## Determinism note
-The simulation is integer-only and deterministic across targets: identical command streams
-produce identical state hashes on Windows, Linux, and the C++ port. No floating point is used
-in any sim or renderer code path. The renderer (crates/render) and PNG encoder are also
-integer-only, so rendered demo frames are byte-identical cross-platform for a given seed.
+```toml
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+```
 
-## Known limitations
-- 32-bit Windows (i686) and ARM64 Windows (aarch64-pc-windows) are not cross-built here.
-  Add the corresponding rustup target + mingw if needed.
-- The binaries link standard MinGW runtime libraries; no non-system DLLs are required.
+Build the launcher:
+
+```bash
+cd rts-game
+cargo build --release -p game-ui --target x86_64-pc-windows-gnu
+# -> target/x86_64-pc-windows-gnu/release/iron-sim.exe
+```
+
+Notes:
+
+- eframe/egui + wgpu compile cleanly for windows-gnu.
+- Determinism note: the Windows build is the SAME deterministic core (integer
+  only, SplitMix64); the platform layer only renders.

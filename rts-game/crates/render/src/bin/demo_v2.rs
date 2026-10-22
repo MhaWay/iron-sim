@@ -2,8 +2,8 @@
 //! usage: demo_v2 [--seed N] [--ticks T] [--player-civ adeptus|dominion] [--locale en|it|de|fr|es]
 //!         [--out DIR] [--frames K]
 
-use game::mapgen::{generate_map_preset, preset_by_name};
 use game::mapgen::Preset;
+use game::mapgen::{generate_map_preset, preset_by_name};
 use game::run_sim;
 use render::demo::demo_commands;
 use render::png::Image;
@@ -34,7 +34,7 @@ fn parse_args() -> (u64, u64, u8, String, PathBuf, u64, Option<&'static Preset>)
             }
             "--out" => out = PathBuf::from(val),
             "--frames" => frames = val.parse().unwrap_or(frames),
-        "--map" => map = preset_by_name(&val),
+            "--map" => map = preset_by_name(&val),
             _ => {}
         }
         i += 2;
