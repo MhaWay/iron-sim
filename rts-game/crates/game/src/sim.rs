@@ -225,6 +225,29 @@ impl Sim {
         sim
     }
 
+    /// Install a preset mapgen map on a fresh `Sim::new(seed)`: despawns legacy node entities
+    /// (anything with a NodePos that isn't a TC), clears the grid, applies the preset terrain,
+    /// respawns the preset nodes, then re-blocks the 3x3 TC footprints.
+    pub fn install_map(&mut self, map: crate::mapgen::MapGen) {
+        use crate::mapgen::MAPGEN_VERSION as V;
+        // reset movement grid, then rebuild via spawn_on (clears + repopulates node storages)
+        for y in 0..MAP_H as i16 {
+            for x in 0..MAP_W as i16 {
+                self.grid.set_blocked(TilePos { x, y }, false);
+            }
+        }
+        let _v = V;
+        map.spawn_on(&mut self.world, &mut self.grid);
+        // TC footprints (matches spawn_default_squads)
+        for px in [14i16, 113i16] {
+            for yy in px..px + 3 {
+                for xx in px..px + 3 {
+                    self.grid.set_blocked(TilePos { x: xx, y: yy }, true);
+                }
+            }
+        }
+        self.sync_mirrors();
+    }
     pub fn tick(&self) -> Tick {
         self.world.tick
     }

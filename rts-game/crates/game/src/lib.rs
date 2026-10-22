@@ -7,6 +7,7 @@
 //! SIM_VERSION: bump deliberately whenever sim math changes; golden hash depends on it.
 
 pub mod economy;
+pub mod mapgen;
 pub mod sim;
 
 pub use sim::{run_sim, Sim, SimError};

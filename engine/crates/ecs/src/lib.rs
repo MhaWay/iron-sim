@@ -119,7 +119,18 @@ impl Storages {
         self.alive.iter().copied()
     }
 
-    pub fn despawn(&mut self, e: Entity) {
+    /// Drop every entry of type T (keeps entity ids alive; used by map installation).
+    pub fn clear<T: 'static>(&mut self) {
+        if let Some(b) = self.stores.get_mut(&TypeId::of::<T>()) {
+            if let Some(vs) = b.downcast_mut::<VecStorage<T>>() {
+                for slot in vs.slots.iter_mut() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+        pub fn despawn(&mut self, e: Entity) {
         if let Some(i) = self.alive.iter().position(|x| *x == e) {
             self.alive.remove(i);
         }
