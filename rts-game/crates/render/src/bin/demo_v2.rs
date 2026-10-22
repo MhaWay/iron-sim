@@ -2,13 +2,15 @@
 //! usage: demo_v2 [--seed N] [--ticks T] [--player-civ adeptus|dominion] [--locale en|it|de|fr|es]
 //!         [--out DIR] [--frames K]
 
+use game::mapgen::{generate_map_preset, preset_by_name};
+use game::mapgen::Preset;
 use game::run_sim;
 use render::demo::demo_commands;
 use render::png::Image;
 use render::scene::render_frame;
 use std::path::PathBuf;
 
-fn parse_args() -> (u64, u64, u8, String, PathBuf, u64) {
+fn parse_args() -> (u64, u64, u8, String, PathBuf, u64, Option<&'static Preset>) {
     let argv: Vec<String> = std::env::args().collect();
     let mut seed = 12345u64;
     let mut ticks = 1800u64;
@@ -16,6 +18,7 @@ fn parse_args() -> (u64, u64, u8, String, PathBuf, u64) {
     let mut locale = "en".to_string();
     let mut out = PathBuf::from("frames");
     let mut frames = 30u64;
+    let mut map: Option<&'static Preset> = None;
     let mut i = 1;
     while i < argv.len() {
         let key = argv[i].as_str();
@@ -31,24 +34,44 @@ fn parse_args() -> (u64, u64, u8, String, PathBuf, u64) {
             }
             "--out" => out = PathBuf::from(val),
             "--frames" => frames = val.parse().unwrap_or(frames),
+        "--map" => map = preset_by_name(&val),
             _ => {}
         }
         i += 2;
     }
-    (seed, ticks, civ, locale, out, frames)
+    (seed, ticks, civ, locale, out, frames, map)
 }
 
 fn main() {
-    let (seed, ticks, civ, locale, out, frames) = parse_args();
+    let (seed, ticks, civ, locale, out, frames, preset) = parse_args();
     std::fs::create_dir_all(&out).expect("create out dir");
     let w = 1024usize;
     let h = 1100usize;
     let step = (ticks / frames.max(1)).max(1);
     let mut img = Image::new(w, h);
     let batches = demo_commands(seed, ticks);
-    let h_final = run_sim(seed, ticks, &batches);
+    let h_final = match preset {
+        Some(p) => {
+            let mut sim = game::sim::Sim::new(seed);
+            sim.install_map(generate_map_preset(seed, *p));
+            let mut bi = 0usize;
+            while (sim.tick()) < ticks {
+                if bi < batches.len() && batches[bi].tick == sim.tick() {
+                    let _ = sim.step(&batches[bi].cmds);
+                    bi += 1;
+                } else {
+                    let _ = sim.step(&[]);
+                }
+            }
+            sim.hash()
+        }
+        None => run_sim(seed, ticks, &batches),
+    };
     // replay for frames (same stream, deterministic replay)
     let mut sim = game::sim::Sim::new(seed);
+    if let Some(p) = preset {
+        sim.install_map(generate_map_preset(seed, *p));
+    }
     let mut bi = 0usize;
     let mut frame_no = 0u64;
     while (sim.tick()) < ticks {
@@ -66,13 +89,14 @@ fn main() {
         }
     }
     println!(
-        "frames={} final_hash={:016x} seed={} ticks={} civ={} locale={} out={}",
+        "frames={} final_hash={:016x} seed={} ticks={} civ={} locale={} out={} map={}",
         frame_no,
         h_final,
         seed,
         ticks,
         if civ == 0 { "adeptus" } else { "dominion" },
         locale,
-        out.display()
+        out.display(),
+        preset.map(|p| p.name).unwrap_or("legacy"),
     );
 }

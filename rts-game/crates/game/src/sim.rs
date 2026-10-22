@@ -237,7 +237,7 @@ impl Sim {
             }
         }
         let _v = V;
-        map.spawn_on(&mut self.world, &mut self.grid);
+        map.spawn_on(&mut self.world, &mut self.grid, true);
         // TC footprints (matches spawn_default_squads)
         for px in [14i16, 113i16] {
             for yy in px..px + 3 {

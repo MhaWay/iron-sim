@@ -52,8 +52,10 @@ pub const ARENA: Preset = Preset {
 
 pub const BLACK_FOREST: Preset = Preset {
     name: "black_forest",
+    // Wide roads (road_w 2) so dense forest cannot seal the center corridor: first-draw
+    // connectivity without full-retry ladder; see docs/mapgen-analysis.md §4 targets.
     base_r: 8,
-    road_w: 1,
+    road_w: 2,
     forest_density: 120,
     gold_count: 2,
     gold_lo: 24,
@@ -67,6 +69,11 @@ pub const BLACK_FOREST: Preset = Preset {
 };
 
 pub const PRESETS: [&Preset; 2] = [&ARENA, &BLACK_FOREST];
+
+/// Generate and install a preset map onto a freshly created Sim (preserving seed stream).
+pub fn generate_map_into(world_seed: u64, preset: Preset) -> MapGen {
+    generate_map_preset(world_seed, preset)
+}
 
 pub fn preset_by_name(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name == name).copied()
@@ -100,7 +107,7 @@ impl MapGen {
     fn digest_words(&self) -> Vec<u64> {
         let w = self.grid.w() as usize;
         let h = self.grid.h() as usize;
-        let mut bits = vec![0u64; (w * h + 63) / 64];
+        let mut bits = vec![0u64; (w * h).div_ceil(64)];
         for y in 0..h {
             for x in 0..w {
                 if self.grid.is_blocked(TilePos { x: x as i16, y: y as i16 }) {
@@ -281,6 +288,22 @@ impl Ctx {
     fn on_road(&self, x: i16, y: i16) -> bool {
         self.in_map(x, y) && self.roads[self.idx(x, y)]
     }
+    /// terrain must stay clear within this band of the central corridor so dense forest cannot
+    /// seal the only link (the reason Black Forest needed 100% repairs before this fix).
+    #[inline]
+    fn corridor_band(&self, x: i16, y: i16) -> bool {
+        let (ax, ay) = self.base_centers[0];
+        let (bx, by) = self.base_centers[1];
+        let w = 2 + self.preset.road_w; // road half-width plus slack
+        // mirrored L-path: (ax,ay)->(bx,ay) horizontal then (bx,ay)->(bx,by) vertical
+        let near_h = (y - ay).abs() <= w
+            && x >= ax.min(bx) - w
+            && x <= ax.max(bx) + w;
+        let near_v = (x - bx).abs() <= w
+            && y >= ay.min(by) - w
+            && y <= ay.max(by) + w;
+        near_h || near_v
+    }
     #[inline]
     fn near_base(&self, x: i16, y: i16, bases: &[(i16, i16)], band: i16) -> bool {
         let r = self.preset.base_r + band;
@@ -292,49 +315,60 @@ impl Ctx {
             return;
         }
         let n = self.n as u64;
-        let target = n * n * d as u64 / 128;
+        let target = n * n * d as u64 / 128; // cells blocked (counting both mirrors)
         let mut done = 0u64;
         let mut tries = 0u64;
-        let cap = target * 24 + 4096;
+        let cap = target * 8 + 4096;
         let cr: i16 = 1 + (d / 64).min(2) as i16;
+        let cells_per_group = ((cr * cr) as u64) * 9 / 8; // ~disc area estimate
         while done < target && tries < cap {
             tries += 1;
             let r = self.rng.next_u64();
             let x = (r % n) as i16;
             let y = ((r >> 20) % n) as i16;
-            if self.blocked(x, y) || self.on_road(x, y) || self.near_base(x, y, bases, 1) {
+            if self.blocked(x, y) || self.on_road(x, y) || self.taken[self.idx(x, y)]
+                || self.near_base(x, y, bases, 1)
+            {
                 continue;
             }
+            // group = cells in the disc that are legal; the mirrored group is computed from
+            // these cells so both halves block exactly the same amount (symmetry by construction).
             let mut group: Vec<(i16, i16)> = Vec::new();
+            let mut mgroup: Vec<(i16, i16)> = Vec::new();
             for dy in -cr..=cr {
                 for dx in -cr..=cr {
                     if dx * dx + dy * dy > cr * cr {
                         continue;
                     }
                     let (cx, cy) = (x + dx, y + dy);
-                    if self.in_map(cx, cy) && !self.blocked(cx, cy) && !self.on_road(cx, cy) {
+                    let (mx, my) = (self.m - cx, self.m - cy);
+                    if self.in_map(cx, cy)
+                        && !self.blocked(cx, cy)
+                        && !self.on_road(cx, cy)
+                        && !self.taken[self.idx(cx, cy)]
+                        && self.in_map(mx, my)
+                        && !self.blocked(mx, my)
+                        && !self.on_road(mx, my)
+                        && !self.taken[self.idx(mx, my)]
+                        && !self.corridor_band(cx, cy)
+                        && !self.corridor_band(mx, my)
+                    {
                         group.push((cx, cy));
+                        mgroup.push((mx, my));
                     }
                 }
             }
             if group.is_empty() {
                 continue;
             }
-            for (cx, cy) in group.iter() {
-                if self.blocked(*cx, *cy) {
-                    continue;
-                }
+            for (cx, cy) in group.iter().chain(mgroup.iter()) {
                 self.set_blocked(*cx, *cy, true);
-                done += 1;
-                let (mx, my) = rot180(*cx, *cy, self.m);
-                if self.in_map(mx, my) && !self.blocked(mx, my) {
-                    self.set_blocked(mx, my, true);
-                    done += 1;
-                }
             }
+            done += (group.len() * 2) as u64;
+            let _ = cells_per_group;
         }
     }
-    fn res_band(&self, slot: u8) -> (i16, i16) {
+fn res_band(&self, slot: u8) -> (i16, i16) {
         match slot {
             0 => (self.preset.gold_lo, self.preset.gold_hi),
             1 => (self.preset.base_r + 2, self.preset.food_hi),
@@ -492,6 +526,7 @@ fn layer_decor(&mut self, bases: &[(i16, i16)]) {
             self.carve_corridor(bases);
             needed = true;
         }
+        #[allow(clippy::needless_range_loop)]
         for b in 0..bases.len() {
             for slot in 0..3u8 {
                 if counts[b][slot as usize] < self.res_want(slot) {
@@ -563,20 +598,20 @@ fn layer_decor(&mut self, bases: &[(i16, i16)]) {
 }
 
 pub fn generate_map_preset(seed: u64, preset: Preset) -> MapGen {
-    let mut attempts = 0u32;
     let k = preset.retries_max;
     let mut last: Option<MapGen> = None;
+    // attempts is per-attempt; the accepted (valid) draw's count is what we report.
     for i in 0..=k {
-        attempts += 1;
         let attempt_seed = seed.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut ctx = Ctx::new(attempt_seed, preset);
         ctx.attempt();
         let (conn, counts) = ctx.validate(&ctx.base_centers);
-        let valid = conn && (0..2).all(|b| (0..3u8).all(|s| counts[b][s as usize] >= preset_res_want(&preset, s)));
+        let valid =
+            conn && (0..2).all(|b| (0..3u8).all(|s| counts[b][s as usize] >= preset_res_want(&preset, s)));
         if valid {
-            return finish(ctx, attempts);
+            return finish(ctx, i + 1);
         }
-        last = Some(finish(ctx, attempts));
+        last = Some(finish(ctx, i + 1));
     }
     last.unwrap()
 }
@@ -605,6 +640,7 @@ impl MapGen {
         &self,
         world: &mut engine_ecs::World,
         grid: &mut Grid,
+        install: bool,
     ) -> Vec<(engine_ecs::Entity, NodePl)> {
         // border ring
         let n = self.grid.w() as i16;
@@ -624,9 +660,11 @@ impl MapGen {
                 }
             }
         }
-        // clear legacy node storages (fresh ids, no stale entries)
-        world.storages.clear::<ResourceNode>();
-        world.storages.clear::<NodePos>();
+        // clear legacy node storages only when installing over an existing sim
+        if install {
+            world.storages.clear::<ResourceNode>();
+            world.storages.clear::<NodePos>();
+        }
         let mut out = Vec::with_capacity(self.nodes.len());
         for nd in &self.nodes {
             if nd.total <= 0 {
@@ -641,3 +679,22 @@ impl MapGen {
     }
 }
 
+
+/// Deterministic run: create Sim::new(seed), install the preset map, then step with cmds.
+/// Returns the final state hash. Preset maps are deterministic per (seed, preset).
+pub fn run_preset(seed: u64, ticks: u64, cmds: &[shared::TickCommands], preset: Preset) -> u64 {
+    let mut sim = crate::sim::Sim::new(seed);
+    let map = generate_map_preset(seed, preset);
+    sim.install_map(map);
+    // step with commands (same contract as run_sim)
+    let mut cmds_i = 0usize;
+    while (sim.tick()) < ticks {
+        if cmds_i < cmds.len() && cmds[cmds_i].tick == sim.tick() {
+            let _ = sim.step(&cmds[cmds_i].cmds);
+            cmds_i += 1;
+        } else {
+            let _ = sim.step(&[]);
+        }
+    }
+    sim.hash()
+}

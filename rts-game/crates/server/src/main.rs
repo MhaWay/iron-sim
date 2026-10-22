@@ -3,6 +3,7 @@
 //! Emits synthetic Move batches, ticks the sim, prints the final state hash and confirms an
 //! identical replay produces an identical hash.
 
+use game::mapgen::preset_by_name;
 use game::run_sim;
 use shared::{Command, TickCommands};
 
@@ -41,11 +42,29 @@ fn main() {
             b
         })
         .collect();
-    let h1 = run_sim(seed, ticks, &batches);
-    let h2 = run_sim(seed, ticks, &batches);
-    println!("seed={} ticks={} final_hash={:016x}", seed, ticks, h1);
+    let map = preset_by_name(&parse_str_arg(&args, "--map").unwrap_or_default());
+    let run = |seed: u64| -> u64 {
+        match map {
+            Some(p) => game::mapgen::run_preset(seed, ticks, &batches, *p),
+            None => run_sim(seed, ticks, &batches),
+        }
+    };
+    let h1 = run(seed);
+    let h2 = run(seed);
+    println!(
+        "seed={} ticks={} map={} final_hash={:016x}",
+        seed,
+        ticks,
+        map.map(|p| p.name).unwrap_or("legacy"),
+        h1
+    );
     assert_eq!(h1, h2, "replay mismatch");
     println!("replay identical: OK");
+}
+
+fn parse_str_arg(args: &[String], flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == flag)? + 1;
+    args.get(i)?.clone().into()
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<u64> {
