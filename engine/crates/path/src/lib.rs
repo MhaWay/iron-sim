@@ -8,6 +8,7 @@ pub struct TilePos {
     pub y: i16,
 }
 
+#[derive(Clone)]
 pub struct Grid {
     w: u16,
     h: u16,
