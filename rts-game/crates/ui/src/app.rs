@@ -286,6 +286,10 @@ impl eframe::App for UiApp {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         static LOGIC1: std::sync::Once = std::sync::Once::new();
         LOGIC1.call_once(|| crate::diag::line("first logic() call (window alive, event loop ok)"));
+        // Continuous swap like Unity/Unreal: request a repaint EVERY frame so a lost
+        // or dropped present cannot leave the window black forever (egui is reactive
+        // by default and will sit idle if a swap is lost).
+        _ctx.request_repaint();
         self.sync_net();
     }
 
@@ -856,6 +860,7 @@ impl UiApp {
                             building: kind,
                             x: tx,
                             y: ty,
+                            level: 1,
                         });
                         self.pending_place = None;
                     } else {

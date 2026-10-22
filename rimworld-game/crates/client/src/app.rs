@@ -90,6 +90,12 @@ impl UiApp {
 }
 
 impl eframe::App for UiApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Continuous game loop like Unity/Unreal: repaint every frame regardless of input,
+        // so a lost/failed swap present recovers on the very next frame.
+        ctx.request_repaint();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         static UI1: std::sync::Once = std::sync::Once::new();
         UI1.call_once(|| {
