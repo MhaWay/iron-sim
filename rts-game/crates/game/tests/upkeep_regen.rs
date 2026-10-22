@@ -92,24 +92,17 @@ fn starvation_is_symmetric() {
     }
     step(&mut a, UPKEEP_GRACE + 3 * UPKEEP_INTERVAL);
     step(&mut b, UPKEEP_GRACE + 3 * UPKEEP_INTERVAL);
-    let ua = (|| {
+    let owner_stats = |sim: &game::Sim| {
         let mut last = None;
-        for (_e, u) in a.world.storages.iter::<Unit>() {
+        for (_e, u) in sim.world.storages.iter::<Unit>() {
             if u.owner == 1 {
                 last = Some((u.hp, u.speed_q));
             }
         }
         last.unwrap()
-    })();
-    let ub = (|| {
-        let mut last = None;
-        for (_e, u) in b.world.storages.iter::<Unit>() {
-            if u.owner == 1 {
-                last = Some((u.hp, u.speed_q));
-            }
-        }
-        last.unwrap()
-    })();
+    };
+    let ua = owner_stats(&a);
+    let ub = owner_stats(&b);
     assert_eq!(ua, ub, "starvation outcome must not depend on run order");
 }
 

@@ -7,6 +7,7 @@ use game_ui::app::UiApp;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1034.0, 1150.0]),
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(

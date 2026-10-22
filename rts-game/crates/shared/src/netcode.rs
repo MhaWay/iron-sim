@@ -18,6 +18,9 @@ use crate::Command;
 /// governed by shared::Command evolution — see lib.rs tests).
 pub const WIRE_VERSION: u8 = 1;
 
+/// Snapshot layout version. v2: full unit Order payload + harvest/work/rally + i64 Fixed1616 positions.
+pub const SNAPSHOT_VERSION: u8 = 2;
+
 /// Canonical hash of a tick's command batch: same function `TickCommands::hash` uses,
 /// exposed here for the lockstep desync check (host broadcasts it, clients recompute).
 pub fn tick_commands_hash(tick: u64, cmds: &[(u32, Command)]) -> u64 {
@@ -37,7 +40,7 @@ const B32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// Encode the low `bits` bits of `x` as RFC4648 base32 (must be a multiple of 5).
 pub fn base32_low_bits(x: u64, bits: usize) -> String {
-    debug_assert!(bits % 5 == 0 && bits <= 60);
+    debug_assert!(bits.is_multiple_of(5) && bits <= 60);
     let mask = (1u64 << bits) - 1;
     let v = x & mask;
     let mut s = String::with_capacity(bits / 5);
@@ -149,8 +152,11 @@ impl Writer {
         self.u32(s.len() as u32);
         self.buf.extend_from_slice(s.as_bytes());
     }
+    /// Append raw bytes verbatim (payload blobs, e.g. encoded Order streams).
+    pub fn bytes(&mut self, v: &[u8]) {
+        self.buf.extend_from_slice(v);
+    }
 }
-
 
 /// Read-side cursor. Bounds every read; returns `WireError::Short` on any overrun.
 pub struct Reader<'a> {
@@ -211,6 +217,13 @@ impl<'a> Reader<'a> {
         let b = self.take(n)?;
         String::from_utf8(b.to_vec()).map_err(|_| WireError::BadUtf8)
     }
+    /// Raw fixed-size blob. Capped so a malformed length cannot allocate.
+    pub fn bytes(&mut self, n: usize) -> Result<Vec<u8>, WireError> {
+        if n > (1 << 16) {
+            return Err(WireError::Short);
+        }
+        Ok(self.take(n)?.to_vec())
+    }
     /// Decoded payload cap — remote batches are bounded, never unbounded from the wire.
     pub const MAX_BATCH_CMDS: usize = 4096;
 }
@@ -242,7 +255,10 @@ pub fn cmd_write(w: &mut Writer, c: &Command) {
             w.i16(*x);
             w.i16(*y);
         }
-        Command::Train { building, unit_kind } => {
+        Command::Train {
+            building,
+            unit_kind,
+        } => {
             w.u8(4);
             w.u32(*building);
             w.u16(*unit_kind);
@@ -521,10 +537,47 @@ pub struct StateSnapshot {
     pub grid_h: u16,
     pub players: Vec<PlayerWire>,
     pub vis: Vec<Vec<u64>>,
-    pub buildings: Vec<(u32, u8, u16, u8, u32, u32, u32, i32, i32, Vec<(u16, u32)>, Option<(i16, i16)>)>,
+    pub buildings: Vec<BuildingWire>,
     pub nodes: Vec<(u32, u8, i64, i64, i16, i16)>,
-    pub units: Vec<(u32, u8, u16, i32, u32, i32, i64, i32, i32, Option<u32>, Option<(Vec<(i16, i16)>, usize)>)>,
+    pub units: Vec<UnitWire>,
     pub blocked: Vec<(u16, u16)>,
+}
+
+/// One building row: (e, owner, kind, status_code, hp, max_hp, timer, pos_x, pos_y, train_q, rally).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::type_complexity)]
+pub struct BuildingWire {
+    pub e: u32,
+    pub owner: u8,
+    pub kind: u16,
+    pub status: u8,
+    pub hp: u32,
+    pub max_hp: u32,
+    pub timer: u32,
+    pub px: i64,
+    pub py: i64,
+    pub q: Vec<(u16, u32)>,
+    pub rp: Option<(i16, i16)>,
+}
+
+/// Unit mirror carrying everything `Sim::hash()` reads from an entity: full Order payload
+/// (bytes of `Order::hash_into`'s stream — hash parity by construction), plus HarvestState /
+/// WorkJob / UnitRally rows and full-Fixed1616 positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnitWire {
+    pub e: u32,
+    pub owner: u8,
+    pub kind: u16,
+    pub hp: i32,
+    pub speed_q: u32,
+    pub dmg: i32,
+    pub range: i64,
+    pub px: i64,
+    pub py: i64,
+    pub order: Vec<u8>,
+    pub harvest: Option<(u8, u32, u8, u32, i32)>,
+    pub work: Option<(u32, u8, u32, u8)>,
+    pub rally: Option<(i16, i16)>,
 }
 
 /// Player-side mirror of `game::economy::PlayerState` over the wire.
@@ -564,11 +617,11 @@ fn msg_write_into(m: &NetMsg, w: &mut Writer) {
             w.u8(1);
             w.u8(*wire_version);
             w.u32(*proto);
-            w.str(&name);
+            w.str(name);
         }
         NetMsg::JoinInvite { code } => {
             w.u8(2);
-            w.str(&code);
+            w.str(code);
         }
         NetMsg::Welcome {
             player_id,
@@ -580,14 +633,14 @@ fn msg_write_into(m: &NetMsg, w: &mut Writer) {
             w.u8(3);
             w.u32(*player_id);
             w.u64(*sim_seed);
-            w.str(&preset);
+            w.str(preset);
             w.u8(*max_players);
-            w.str(&lobby_code);
+            w.str(lobby_code);
         }
         NetMsg::Refused { code, detail } => {
             w.u8(4);
             w.u8(code.tag());
-            w.str(&detail);
+            w.str(detail);
         }
         NetMsg::Lobby {
             players,
@@ -608,7 +661,7 @@ fn msg_write_into(m: &NetMsg, w: &mut Writer) {
             }
             w.u32(*host_id);
             w.u8(*started as u8);
-            w.str(&preset);
+            w.str(preset);
             w.u64(*seed);
             w.u8(*max_players);
         }
@@ -652,7 +705,7 @@ fn msg_write_into(m: &NetMsg, w: &mut Writer) {
         NetMsg::Chat { player_id, text } => {
             w.u8(11);
             w.u32(*player_id);
-            w.str(&text);
+            w.str(text);
         }
         NetMsg::Ping { t_millis } => {
             w.u8(12);
@@ -662,7 +715,10 @@ fn msg_write_into(m: &NetMsg, w: &mut Writer) {
             w.u8(13);
             w.u64(*t_millis);
         }
-        NetMsg::PeerJoined { player_id, connected } => {
+        NetMsg::PeerJoined {
+            player_id,
+            connected,
+        } => {
             w.u8(14);
             w.u32(*player_id);
             w.u8(*connected as u8);
@@ -757,17 +813,15 @@ pub fn msg_read(buf: &[u8]) -> Result<NetMsg, WireError> {
             player_id: r.u32()?,
             text: r.str()?,
         },
-        12 => NetMsg::Ping {
-            t_millis: r.u64()?,
-        },
-        13 => NetMsg::Pong {
-            t_millis: r.u64()?,
-        },
+        12 => NetMsg::Ping { t_millis: r.u64()? },
+        13 => NetMsg::Pong { t_millis: r.u64()? },
         14 => NetMsg::PeerJoined {
             player_id: r.u32()?,
             connected: r.u8()? != 0,
         },
-        15 => NetMsg::PeerLeft { player_id: r.u32()? },
+        15 => NetMsg::PeerLeft {
+            player_id: r.u32()?,
+        },
         16 => NetMsg::Pause {
             paused: r.u8()? != 0,
         },
@@ -835,16 +889,19 @@ fn snapshot_write(s: &StateSnapshot, w: &mut Writer) {
         }
     }
     w.u32(s.buildings.len() as u32);
-    for (e, owner, kind, status, hp, max_hp, timer, px, py, q, rp) in &s.buildings {
-        w.u32(*e);
-        w.u32(*owner as u32);
-        w.u16(*kind);
-        w.u8(*status);
-        w.u32(*hp);
-        w.u32(*max_hp);
-        w.u32(*timer);
-        w.i32(*px);
-        w.i32(*py);
+    for b in &s.buildings {
+        let (e, owner, kind, status, hp, max_hp, timer, px, py, q, rp) = (
+            b.e, b.owner, b.kind, b.status, b.hp, b.max_hp, b.timer, b.px, b.py, &b.q, b.rp,
+        );
+        w.u32(e);
+        w.u32(owner as u32);
+        w.u16(kind);
+        w.u8(status);
+        w.u32(hp);
+        w.u32(max_hp);
+        w.u32(timer);
+        w.i64(px);
+        w.i64(py);
         w.u32(q.len() as u32);
         for (k, t) in q {
             w.u16(*k);
@@ -852,8 +909,8 @@ fn snapshot_write(s: &StateSnapshot, w: &mut Writer) {
         }
         w.u8(rp.is_some() as u8);
         if let Some((tx, ty)) = rp {
-            w.i16(*tx);
-            w.i16(*ty);
+            w.i16(tx);
+            w.i16(ty);
         }
     }
     w.u32(s.nodes.len() as u32);
@@ -867,32 +924,54 @@ fn snapshot_write(s: &StateSnapshot, w: &mut Writer) {
     }
     w.u32(s.units.len() as u32);
     for u in &s.units {
-        let (e, owner, kind, hp, speed_q, dmg, range, px, py, order, path) = u;
-        w.u32(*e);
-        w.u8(*owner);
-        w.u16(*kind);
-        w.i32(*hp);
-        w.u32(*speed_q);
-        w.i32(*dmg);
-        w.i64(*range);
-        w.i32(*px);
-        w.i32(*py);
-        match order {
+        let e = u.e;
+        let owner = u.owner;
+        let kind = u.kind;
+        let hp = u.hp;
+        let speed_q = u.speed_q;
+        let dmg = u.dmg;
+        let range = u.range;
+        let px = u.px;
+        let py = u.py;
+        w.u32(e);
+        w.u8(owner);
+        w.u16(kind);
+        w.i32(hp);
+        w.u32(speed_q);
+        w.i32(dmg);
+        w.i64(range);
+        w.i64(px);
+        w.i64(py);
+        // order is the canonical Order payload (tag byte already included; empty = no component)
+        w.u32(u.order.len() as u32);
+        w.bytes(&u.order);
+        match &u.harvest {
             None => w.u8(0),
-            Some(h) => {
-                w.u8(*h as u8 + 1);
-                if *h == 2 {
-                    // Move order: path + waypoint follow in the path field
-                }
+            Some((code, node, slot, ticks, amount)) => {
+                w.u8(*code + 1);
+                w.u32(*node);
+                w.u8(*slot);
+                w.u32(*ticks);
+                w.i32(*amount);
             }
         }
-        if let Some((path, wp)) = path {
-            w.u32(path.len() as u32);
-            for (x, y) in path {
-                w.i16(*x);
-                w.i16(*y);
+        match &u.work {
+            None => w.u8(0),
+            Some((building, slot, node, mode)) => {
+                w.u8(1);
+                w.u32(*building);
+                w.u8(*slot);
+                w.u32(*node);
+                w.u8(*mode);
             }
-            w.u32(*wp as u32);
+        }
+        match &u.rally {
+            None => w.u8(0),
+            Some((tx, ty)) => {
+                w.u8(1);
+                w.i16(*tx);
+                w.i16(*ty);
+            }
         }
     }
     w.u32(s.blocked.len() as u32);
@@ -904,6 +983,9 @@ fn snapshot_write(s: &StateSnapshot, w: &mut Writer) {
 
 fn snapshot_read(r: &mut Reader) -> Result<StateSnapshot, WireError> {
     let version = r.u8()?;
+    if version != SNAPSHOT_VERSION {
+        return Err(WireError::BadTag);
+    }
     let tick = r.u64()?;
     let rng_state = r.u64()?;
     let hash_after = r.u64()?;
@@ -947,8 +1029,8 @@ fn snapshot_read(r: &mut Reader) -> Result<StateSnapshot, WireError> {
         let hp = r.u32()?;
         let max_hp = r.u32()?;
         let timer = r.u32()?;
-        let px = r.i32()?;
-        let py = r.i32()?;
+        let px = r.i64()?;
+        let py = r.i64()?;
         let nq = clamp_u32(r.u32()?, 64)?;
         let mut q = Vec::with_capacity(nq);
         for _ in 0..nq {
@@ -958,7 +1040,19 @@ fn snapshot_read(r: &mut Reader) -> Result<StateSnapshot, WireError> {
             0 => None,
             _ => Some((r.i16()?, r.i16()?)),
         };
-        buildings.push((e, owner, kind, status, hp, max_hp, timer, px, py, q, rp));
+        buildings.push(BuildingWire {
+            e,
+            owner,
+            kind,
+            status,
+            hp,
+            max_hp,
+            timer,
+            px,
+            py,
+            q,
+            rp,
+        });
     }
     let nn = clamp_u32(r.u32()?, 8192)?;
     let mut nodes = Vec::with_capacity(nn.min(64));
@@ -975,24 +1069,37 @@ fn snapshot_read(r: &mut Reader) -> Result<StateSnapshot, WireError> {
         let speed_q = r.u32()?;
         let dmg = r.i32()?;
         let range = r.i64()?;
-        let px = r.i32()?;
-        let py = r.i32()?;
-        let order = match r.u8()? {
+        let px = r.i64()?;
+        let py = r.i64()?;
+        let nlo = clamp_u32(r.u32()?, 4096)?;
+        let order = r.bytes(nlo)?;
+        let harvest = match r.u8()? {
             0 => None,
-            t => Some((t - 1) as u32),
+            t => Some((t - 1, r.u32()?, r.u8()?, r.u32()?, r.i32()?)),
         };
-        // path present iff order code 2 (Move) — same convention as writer.
-        let path = if order == Some(2) {
-            let n = clamp_u32(r.u32()?, 1_000_000)?;
-            let mut p = Vec::with_capacity(n.min(32));
-            for _ in 0..n {
-                p.push((r.i16()?, r.i16()?));
-            }
-            Some((p, r.u32()? as usize))
-        } else {
-            None
+        let work = match r.u8()? {
+            0 => None,
+            _ => Some((r.u32()?, r.u8()?, r.u32()?, r.u8()?)),
         };
-        units.push((e, owner, kind, hp, speed_q, dmg, range, px, py, order, path));
+        let rally = match r.u8()? {
+            0 => None,
+            _ => Some((r.i16()?, r.i16()?)),
+        };
+        units.push(UnitWire {
+            e,
+            owner,
+            kind,
+            hp,
+            speed_q,
+            dmg,
+            range,
+            px,
+            py,
+            order,
+            harvest,
+            work,
+            rally,
+        });
     }
     let nblk = clamp_u32(r.u32()?, 65536)?;
     let mut blocked = Vec::with_capacity(nblk.min(128));
@@ -1026,7 +1133,11 @@ mod tests {
             assert_eq!(code.len(), 8);
             let back = base32_decode_low_bits(&code, 40).unwrap();
             // round-trip must preserve the low 40 bits that were encoded
-            assert_eq!(back & ((1u64 << 40) - 1), seed & ((1u64 << 40) - 1), "seed {seed}");
+            assert_eq!(
+                back & ((1u64 << 40) - 1),
+                seed & ((1u64 << 40) - 1),
+                "seed {seed}"
+            );
         }
         // decode is case-insensitive
         let code = invite_code(99);
@@ -1039,23 +1150,47 @@ mod tests {
     #[test]
     fn command_wire_roundtrip_all_variants() {
         let cmds = [
-            Command::Move { unit: 1, x: 2, y: 3 },
+            Command::Move {
+                unit: 1,
+                x: 2,
+                y: 3,
+            },
             Command::Attack { unit: 4, target: 5 },
             Command::Stop { unit: 6 },
-            Command::Build { building: 7, x: -8, y: 9 },
-            Command::Train { building: 10, unit_kind: 11 },
-            Command::Gather { unit: 12, resource: 13 },
+            Command::Build {
+                building: 7,
+                x: -8,
+                y: 9,
+            },
+            Command::Train {
+                building: 10,
+                unit_kind: 11,
+            },
+            Command::Gather {
+                unit: 12,
+                resource: 13,
+            },
             Command::Sacrifice { unit: 14 },
-            Command::Evolve { tier: 15, unit_type: 16 },
+            Command::Evolve {
+                tier: 15,
+                unit_type: 16,
+            },
             Command::AgeUp { age: 17 },
-            Command::RallyPoint { building: 18, tx: 19, ty: -20 },
-            Command::Rally { unit: 21, tx: -22, ty: 23 },
+            Command::RallyPoint {
+                building: 18,
+                tx: 19,
+                ty: -20,
+            },
+            Command::Rally {
+                unit: 21,
+                tx: -22,
+                ty: 23,
+            },
         ];
         for c in cmds {
-            let mut buf = Vec::new();
             let mut w = Writer::new(Vec::new());
             cmd_write(&mut w, &c);
-            buf = w.into_buf();
+            let buf = w.into_buf();
             let mut r = Reader::new(&buf);
             let got = cmd_read(&mut r).unwrap();
             assert_eq!(c, got);
@@ -1066,23 +1201,78 @@ mod tests {
     #[test]
     fn netmsg_roundtrip_all_variants() {
         let msgs = vec![
-            NetMsg::Hello { wire_version: WIRE_VERSION, proto: 1, name: "host".into() },
-            NetMsg::JoinInvite { code: "ABCD1234".into() },
-            NetMsg::Welcome { player_id: 2, sim_seed: 777, preset: "arena".into(), max_players: 2, lobby_code: "ABCD1234".into() },
-            NetMsg::Refused { code: RefuseCode::BadInvite, detail: "nope".into() },
-            NetMsg::Lobby { players: vec![PlayerInfo::new(1, "alice".into(), 0), PlayerInfo::new(2, "bob".into(), 1)], host_id: 1, started: true, preset: "arena".into(), seed: 9, max_players: 2 },
+            NetMsg::Hello {
+                wire_version: WIRE_VERSION,
+                proto: 1,
+                name: "host".into(),
+            },
+            NetMsg::JoinInvite {
+                code: "ABCD1234".into(),
+            },
+            NetMsg::Welcome {
+                player_id: 2,
+                sim_seed: 777,
+                preset: "arena".into(),
+                max_players: 2,
+                lobby_code: "ABCD1234".into(),
+            },
+            NetMsg::Refused {
+                code: RefuseCode::BadInvite,
+                detail: "nope".into(),
+            },
+            NetMsg::Lobby {
+                players: vec![
+                    PlayerInfo::new(1, "alice".into(), 0),
+                    PlayerInfo::new(2, "bob".into(), 1),
+                ],
+                host_id: 1,
+                started: true,
+                preset: "arena".into(),
+                seed: 9,
+                max_players: 2,
+            },
             NetMsg::Ready { ready: true },
             NetMsg::Start,
-            NetMsg::TickBatch { tick: 1234567, cmds: vec![(0, Command::Move { unit: 1, x: 1, y: 1 }), (1, Command::Stop { unit: 2 })] },
-            NetMsg::SyncDigest { tick: 300, digest: 0xabcd_0000_1234_5678, window: 128, interval: 300 },
-            NetMsg::Input { tick: 301, cmds: vec![] },
-            NetMsg::Chat { player_id: 2, text: "gl hf".into() },
+            NetMsg::TickBatch {
+                tick: 1234567,
+                cmds: vec![
+                    (
+                        0,
+                        Command::Move {
+                            unit: 1,
+                            x: 1,
+                            y: 1,
+                        },
+                    ),
+                    (1, Command::Stop { unit: 2 }),
+                ],
+            },
+            NetMsg::SyncDigest {
+                tick: 300,
+                digest: 0xabcd_0000_1234_5678,
+                window: 128,
+                interval: 300,
+            },
+            NetMsg::Input {
+                tick: 301,
+                cmds: vec![],
+            },
+            NetMsg::Chat {
+                player_id: 2,
+                text: "gl hf".into(),
+            },
             NetMsg::Ping { t_millis: 0 },
             NetMsg::Pong { t_millis: u64::MAX },
-            NetMsg::PeerJoined { player_id: 3, connected: true },
+            NetMsg::PeerJoined {
+                player_id: 3,
+                connected: true,
+            },
             NetMsg::PeerLeft { player_id: 3 },
             NetMsg::Pause { paused: true },
-            NetMsg::Reconnect { player_id: 1, token: 123 },
+            NetMsg::Reconnect {
+                player_id: 1,
+                token: 123,
+            },
             NetMsg::KeepAlive,
         ];
         for m in msgs {
@@ -1095,27 +1285,87 @@ mod tests {
 
     #[test]
     fn snapshot_roundtrip() {
+        // Move order payload exactly as order_bytes emits it in crates/net (tag 1, u64 wp, u64 len, i32 per axis).
+        let mut order_payload: Vec<u8> = vec![1u8];
+        order_payload.extend_from_slice(&1u64.to_le_bytes());
+        order_payload.extend_from_slice(&2u64.to_le_bytes());
+        order_payload.extend_from_slice(&112i32.to_le_bytes());
+        order_payload.extend_from_slice(&112i32.to_le_bytes());
+        order_payload.extend_from_slice(&111i32.to_le_bytes());
+        order_payload.extend_from_slice(&112i32.to_le_bytes());
         let s = StateSnapshot {
-            version: 1,
+            version: SNAPSHOT_VERSION,
             tick: 4211,
             rng_state: 0x1234_5678_9abc_def0,
             hash_after: 0xcafe,
             grid_w: 128,
             grid_h: 128,
-            players: vec![PlayerWire { food: 150, wood: 150, gold: 0, mana: 0, age: 1, age_target: 2, age_timer: 600, civ: 0, score: 17, winner: 0, wonder: 0, wonder_started: 0 }],
+            players: vec![PlayerWire {
+                food: 150,
+                wood: 150,
+                gold: 0,
+                mana: 0,
+                age: 1,
+                age_target: 2,
+                age_timer: 600,
+                civ: 0,
+                score: 17,
+                winner: 0,
+                wonder: 0,
+                wonder_started: 0,
+            }],
             vis: vec![vec![0, 1], vec![7]],
-            buildings: vec![(5, 0, 0, 2, 100, 100, 0, 15, 15, vec![(1, 20)], Some((16, 16)))],
+            buildings: vec![BuildingWire {
+                e: 5,
+                owner: 0,
+                kind: 0,
+                status: 2,
+                hp: 100,
+                max_hp: 100,
+                timer: 0,
+                px: 15,
+                py: 15,
+                q: vec![(1, 20)],
+                rp: Some((16, 16)),
+            }],
             nodes: vec![(30, 0, 2000, 1998, 40, 41)],
             units: vec![
-                (10, 0, 0, 100, 1024, 5, 1572864, 14, 15, None, None),
-                (11, 1, 1, 100, 1100, 6, 1572864, 113, 113, Some(2), Some((vec![(112, 112), (111, 112)], 1))),
+                UnitWire {
+                    e: 10,
+                    owner: 0,
+                    kind: 0,
+                    hp: 100,
+                    speed_q: 1024,
+                    dmg: 5,
+                    range: 1572864,
+                    px: 14,
+                    py: 15,
+                    order: Vec::new(),
+                    harvest: None,
+                    work: None,
+                    rally: None,
+                },
+                UnitWire {
+                    e: 11,
+                    owner: 1,
+                    kind: 1,
+                    hp: 100,
+                    speed_q: 1100,
+                    dmg: 6,
+                    range: 1572864,
+                    px: 113,
+                    py: 113,
+                    order: order_payload,
+                    harvest: Some((1, 30, 0, 12, 0)),
+                    work: Some((7, 1, 3, 1)),
+                    rally: None,
+                },
             ],
             blocked: vec![(1, 1), (126, 126)],
         };
-        let mut buf = Vec::new();
         let mut w = Writer::new(Vec::new());
         snapshot_write(&s, &mut w);
-        buf = w.into_buf();
+        let buf = w.into_buf();
         let got = snapshot_read(&mut Reader::new(&buf)).unwrap();
         assert_eq!(s, got);
     }
@@ -1123,11 +1373,31 @@ mod tests {
     #[test]
     fn tick_digest_matches_tickcommands_hash() {
         let cmds = vec![
-            (1u32, Command::Move { unit: 1, x: 2, y: 3 }),
+            (
+                1u32,
+                Command::Move {
+                    unit: 1,
+                    x: 2,
+                    y: 3,
+                },
+            ),
             (0u32, Command::Attack { unit: 1, target: 2 }),
         ];
         let h = tick_commands_hash(9, &cmds);
-        let mut t = crate::TickCommands { tick: 9, cmds: vec![(0u32, Command::Attack { unit: 1, target: 2 }), (1u32, Command::Move { unit: 1, x: 2, y: 3 })] };
+        let mut t = crate::TickCommands {
+            tick: 9,
+            cmds: vec![
+                (0u32, Command::Attack { unit: 1, target: 2 }),
+                (
+                    1u32,
+                    Command::Move {
+                        unit: 1,
+                        x: 2,
+                        y: 3,
+                    },
+                ),
+            ],
+        };
         t.sort();
         assert_eq!(h, t.hash());
     }
@@ -1149,7 +1419,20 @@ mod tests {
     fn decoder_rejects_truncated_and_bad_tags() {
         // truncated TickBatch
         let mut buf = Vec::new();
-        msg_write(&NetMsg::TickBatch { tick: 1, cmds: vec![(0, Command::Move { unit: 1, x: 1, y: 1 })] }, &mut buf);
+        msg_write(
+            &NetMsg::TickBatch {
+                tick: 1,
+                cmds: vec![(
+                    0,
+                    Command::Move {
+                        unit: 1,
+                        x: 1,
+                        y: 1,
+                    },
+                )],
+            },
+            &mut buf,
+        );
         buf.truncate(6);
         assert!(msg_read(&buf).is_err());
         // bogus tag

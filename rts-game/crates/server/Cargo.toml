@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 shared = { path = "../shared" }
 game = { path = "../game" }
+net = { path = "../net" }
+tokio = { workspace = true }

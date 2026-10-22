@@ -7,7 +7,9 @@ license.workspace = true
 [dependencies]
 shared = { path = "../shared" }
 game = { path = "../game" }
-engine-core = { path = "../../../engine/crates/core" }
+engine-core = { workspace = true }
+engine-ecs = { workspace = true }
+engine-path = { workspace = true }
 quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true

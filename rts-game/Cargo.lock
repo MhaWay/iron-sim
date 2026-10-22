@@ -838,6 +838,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_font_provider",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -2036,6 +2037,8 @@ name = "net"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "engine-ecs",
+ "engine-path",
  "game",
  "quinn",
  "rcgen",
@@ -3256,7 +3259,9 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "game",
+ "net",
  "shared",
+ "tokio",
 ]
 
 [[package]]
