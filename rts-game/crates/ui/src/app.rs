@@ -3,6 +3,7 @@
 //! The sim steps EXACTLY once per tick with canonical sorted batches; egui floats are view-only.
 
 use crate::config::{MatchConfig, SlotKind};
+use crate::netmod::{LobbyView, NetController, NetMirror};
 use crate::state::{Screen, UiState};
 use eframe::egui::{
     self, Button, Color32, ComboBox, RichText, Slider, TextureHandle, TextureOptions,
@@ -22,6 +23,10 @@ pub struct MatchView {
     pub live: Vec<(u32, Command)>,
     pub paused: bool,
     pub last_err: Option<String>,
+    /// Multiplayer mode: commands flow through the net session instead of local stepping.
+    pub net_mode: bool,
+    /// Mirror of the session's authoritative sim (only used when net_mode).
+    pub net_sim: Option<Sim>,
 }
 
 impl MatchView {
@@ -37,10 +42,18 @@ impl MatchView {
             live: Vec::new(),
             paused: false,
             last_err: None,
+            net_mode: false,
+            net_sim: None,
         }
     }
 
     pub fn tick(&mut self) -> Result<(), game::SimError> {
+        // Multiplayer: the session thread steps the authoritative sim (HostSession::
+        // step_tick / ClientSession::apply_batch on its own tasks) — the UI thread
+        // never calls Sim::step. netmode mirrors only.
+        if self.net_mode {
+            return Ok(());
+        }
         let mut cmds: Vec<(u32, Command)> = Vec::new();
         if let Some(b) = self.schedule.get(self.schedule_idx) {
             if b.tick == self.sim.tick() {
@@ -56,12 +69,21 @@ impl MatchView {
     }
 
     pub fn unit_count(&self, owner: u32) -> usize {
-        self.sim
+        self.sim_ref()
             .world
             .storages
             .iter::<Unit>()
             .filter(|(_, u)| u.owner as u32 == owner)
             .count()
+    }
+
+    /// The sim the view should READ: authoritative mirror in net mode, local sim otherwise.
+    pub fn sim_ref(&self) -> &Sim {
+        if self.net_mode {
+            self.net_sim.as_ref().unwrap_or(&self.sim)
+        } else {
+            &self.sim
+        }
     }
 }
 
@@ -73,6 +95,20 @@ pub struct UiApp {
     pub local: u32,
     pub sel: Vec<u32>,
     pub pending_place: Option<u16>,
+    /// Session-thread controller (None = singleplayer / no live session).
+    pub net: NetController,
+    /// Mirrored session state consumed by the UI each frame.
+    pub net_mirror: NetMirror,
+    /// Host lobby view (None = lobby not yet broadcast).
+    pub lobby: Option<LobbyView>,
+    // --- menu form state ---
+    pub host_addr: String,
+    pub host_seed_str: String,
+    pub join_addr: String,
+    pub join_code: String,
+    pub join_seed_str: String,
+    pub net_err: Option<String>,
+    pub net_status: Option<String>,
 }
 
 impl Default for UiApp {
@@ -91,16 +127,40 @@ impl UiApp {
             local: 0,
             sel: Vec::new(),
             pending_place: None,
+            net: NetController::new(),
+            net_mirror: NetMirror::default(),
+            lobby: None,
+            host_addr: "127.0.0.1:4738".to_string(),
+            host_seed_str: "12345".to_string(),
+            join_addr: "127.0.0.1:4738".to_string(),
+            join_code: String::new(),
+            join_seed_str: "12345".to_string(),
+            net_err: None,
+            net_status: None,
         }
     }
 
     pub fn start_match(&mut self) {
-        self.view = Some(MatchView::new(&self.state.cfg));
+        let is_net = self.net.handle().is_some();
+        let v = MatchView::new(&self.state.cfg);
+        self.view = Some(if is_net {
+            let mut v = v;
+            v.net_mode = true;
+            v
+        } else {
+            v
+        });
         self.sel.clear();
         self.pending_place = None;
+        self.state.screen = Screen::Playing;
     }
 
     pub fn issue(&mut self, cmd: Command) {
+        // Net mode: queue the command on the session thread (tick stamping happens there).
+        if let Some(h) = self.net.handle() {
+            let _ = h.input_tx.send((self.local, cmd));
+            return;
+        }
         if let Some(v) = &mut self.view {
             v.live.push((self.local, cmd));
         }
@@ -108,14 +168,28 @@ impl UiApp {
 
     fn frame_texture(&mut self, ctx: &egui::Context) {
         if let Some(v) = &self.view {
-            let civ = v.sim.players[self.local as usize].civ;
-            render::scene::render_frame(
-                &v.sim,
-                &mut self.img,
-                civ,
-                v.sim.tick(),
-                &self.state.cfg.locale,
-            );
+            // Multiplayer renders the mirrored authoritative sim; singleplayer the local one.
+            if v.net_mode {
+                if let Some(s) = &v.net_sim {
+                    let civ = s.players[self.local as usize].civ;
+                    render::scene::render_frame(
+                        s,
+                        &mut self.img,
+                        civ,
+                        s.tick(),
+                        &self.state.cfg.locale,
+                    );
+                }
+            } else {
+                let civ = v.sim.players[self.local as usize].civ;
+                render::scene::render_frame(
+                    &v.sim,
+                    &mut self.img,
+                    civ,
+                    v.sim.tick(),
+                    &self.state.cfg.locale,
+                );
+            }
         }
         let mut rgba: Vec<u8> = Vec::with_capacity(self.img.w * self.img.h * 4);
         for c in self.img.data.chunks(3) {
@@ -131,30 +205,88 @@ impl UiApp {
     /// First alive own-unit whose tile matches.
     fn find_unit_at(&self, tx: i16, ty: i16) -> Option<u32> {
         let v = self.view.as_ref()?;
-        v.sim.world.storages.iter::<Unit>().find_map(|(e, u)| {
-            if u.owner as u32 != self.local {
-                return None;
-            }
-            v.sim
-                .tile_of_unit(e.0)
-                .and_then(|(x, y)| if x == tx && y == ty { Some(e.0) } else { None })
-        })
+        v.sim_ref()
+            .world
+            .storages
+            .iter::<Unit>()
+            .find_map(|(e, u)| {
+                if u.owner as u32 != self.local {
+                    return None;
+                }
+                v.sim_ref().tile_of_unit(e.0).and_then(|(x, y)| {
+                    if x == tx && y == ty {
+                        Some(e.0)
+                    } else {
+                        None
+                    }
+                })
+            })
     }
 
     fn find_enemy_unit_at(&self, tx: i16, ty: i16) -> Option<u32> {
         let v = self.view.as_ref()?;
-        v.sim.world.storages.iter::<Unit>().find_map(|(e, u)| {
-            if u.owner as u32 == self.local {
-                return None;
+        v.sim_ref()
+            .world
+            .storages
+            .iter::<Unit>()
+            .find_map(|(e, u)| {
+                if u.owner as u32 == self.local {
+                    return None;
+                }
+                v.sim_ref().tile_of_unit(e.0).and_then(|(x, y)| {
+                    if x == tx && y == ty {
+                        Some(e.0)
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+}
+
+impl UiApp {
+    /// Start the live match: host fires NetMsg::Start via the session thread; the
+    /// view renders from the mirrored authoritative sim instead of stepping locally.
+    pub fn start_match_net(&mut self) {
+        let Some(h) = self.net.handle() else {
+            self.start_match();
+            return;
+        };
+        if h.is_host {
+            h.start_match();
+        }
+        self.state.paused = false;
+        self.state.screen = Screen::Playing;
+        let mut v = MatchView::new(&self.state.cfg);
+        v.net_mode = true;
+        v.net_sim = None; // populated by authoritative snapshots in sync_net
+        self.view = Some(v);
+        self.local = if h.is_host { 0 } else { 1 };
+        self.sel.clear();
+        self.pending_place = None;
+    }
+
+    /// Called every frame: consume session events and sync the mirrored sim.
+    fn sync_net(&mut self) {
+        self.net.drain_into(&mut self.net_mirror);
+        if let Some(lobby) = self.net_mirror.lobby.clone() {
+            self.lobby = Some(lobby);
+        }
+        if let Some(v) = &mut self.view {
+            if v.net_mode {
+                if let Some(s) = self.net.snapshot() {
+                    v.net_sim = Some(s);
+                }
             }
-            v.sim
-                .tile_of_unit(e.0)
-                .and_then(|(x, y)| if x == tx && y == ty { Some(e.0) } else { None })
-        })
+        }
     }
 }
 
 impl eframe::App for UiApp {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_net();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         match self.state.screen {
             Screen::Menu => self.menu_ui(ui),
@@ -196,12 +328,163 @@ impl UiApp {
                 self.state.open_custom();
             }
             ui.add_space(16.0);
+            let hostbtn = if it { "HOST PARTITA" } else { "HOST GAME" };
+            if ui
+                .add(
+                    Button::new(
+                        RichText::new(hostbtn)
+                            .size(24.0)
+                            .color(Color32::LIGHT_GREEN),
+                    )
+                    .min_size(egui::vec2(400.0, 64.0)),
+                )
+                .clicked()
+            {
+                self.net_err = None;
+                self.net_status = None;
+                self.lobby = None;
+                let seed = self.host_seed_str.parse().unwrap_or(self.state.cfg.seed);
+                if let Err(e) =
+                    self.net
+                        .start_host(seed, self.state.cfg.preset.clone(), self.host_addr.clone())
+                {
+                    self.net_err = Some(e);
+                }
+            }
+            ui.add_space(16.0);
+            let joinbtn = if it { "UNISCI PARTITA" } else { "JOIN GAME" };
+            if ui
+                .add(
+                    Button::new(
+                        RichText::new(joinbtn)
+                            .size(24.0)
+                            .color(Color32::from_rgb(150, 200, 255)),
+                    )
+                    .min_size(egui::vec2(400.0, 64.0)),
+                )
+                .clicked()
+            {
+                self.net_err = None;
+                self.net_status = None;
+                self.lobby = None;
+                let seed = self.join_seed_str.parse().unwrap_or(self.state.cfg.seed);
+                if let Err(e) = self.net.start_client(
+                    self.join_addr.clone(),
+                    seed,
+                    self.state.cfg.preset.clone(),
+                ) {
+                    self.net_err = Some(e);
+                }
+            }
+            ui.add_space(16.0);
+            if let Some(e) = self.net_err.clone() {
+                ui.colored_label(Color32::RED, e);
+            } else if let Some(st) = self.net_status.clone() {
+                ui.colored_label(Color32::YELLOW, st);
+            }
+            // Host controls: address + seed, and lobby info once live.
+            if self.net.handle().is_some_and(|h| h.is_host) {
+                ui.horizontal(|ui| {
+                    ui.label(if it { "Indirizzo:" } else { "Address:" });
+                    ui.add(egui::TextEdit::singleline(&mut self.host_addr).desired_width(160.0));
+                    ui.label("Seed:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.host_seed_str).desired_width(100.0),
+                    );
+                });
+                if let Some(lobby) = &self.lobby {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(if it { "Codice:" } else { "Code:" });
+                            ui.label(RichText::new(lobby.lobby_code.clone()).strong().monospace());
+                        });
+                        ui.label(format!(
+                            "{} / {}  {}",
+                            lobby.connected_count(),
+                            lobby.max_players,
+                            if lobby.started {
+                                if it {
+                                    "avviata"
+                                } else {
+                                    "started"
+                                }
+                            } else {
+                                "lobby"
+                            }
+                        ));
+                        ui.label(if it {
+                            "Code (base32 seed) = invito LAN"
+                        } else {
+                            "code (base32 of seed) for LAN invite"
+                        });
+                    });
+                    if ui.button("START MATCH").clicked() {
+                        self.net_status = None;
+                        self.start_match_net();
+                    }
+                } else if let Some(h) = self.net.handle() {
+                    let code = h.lobby_code.clone();
+                    ui.label(if it {
+                        "Host live — condividi il codice:"
+                    } else {
+                        "Host live — share the code:"
+                    });
+                    ui.label(RichText::new(code).strong().monospace().size(18.0));
+                }
+            } else if self.net.handle().is_some_and(|h| !h.is_host) {
+                // Client joining: confirm addr+seed (invite code = base32 of seed).
+                ui.horizontal(|ui| {
+                    ui.label("Addr:");
+                    ui.add(egui::TextEdit::singleline(&mut self.join_addr).desired_width(160.0));
+                    ui.label("Seed:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.join_seed_str).desired_width(100.0),
+                    );
+                });
+                ui.label(if it {
+                    "Code (base32 del seed):"
+                } else {
+                    "code (base32 of seed):"
+                });
+                if let Some(lobby) = &self.lobby {
+                    ui.label(RichText::new(lobby.lobby_code.clone()).strong().monospace());
+                }
+                if self.net_mirror.started {
+                    ui.colored_label(
+                        Color32::LIGHT_GREEN,
+                        if it { "collegato" } else { "connected" },
+                    );
+                } else {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        if it {
+                            "connessione…"
+                        } else {
+                            "connecting…"
+                        },
+                    );
+                }
+            }
+            ui.add_space(16.0);
             let quit = if it { "Esci" } else { "Exit" };
             if ui
                 .add(Button::new(RichText::new(quit).size(20.0)).min_size(egui::vec2(400.0, 48.0)))
                 .clicked()
             {
+                self.net.stop();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            if self.net.handle().is_some() {
+                let label = if it {
+                    "Chiudi sessione"
+                } else {
+                    "Close session"
+                };
+                if ui.button(label).clicked() {
+                    self.net.stop();
+                    self.lobby = None;
+                    self.net_mirror = NetMirror::default();
+                }
             }
             ui.add_space(32.0);
             ui.label(RichText::new("v0.3.0-ui · deterministic engine").weak());
@@ -349,7 +632,11 @@ impl UiApp {
                     .clicked()
                     && self.state.start_match()
                 {
-                    self.start_match();
+                    if self.net.handle().is_some() {
+                        self.start_match_net();
+                    } else {
+                        self.start_match();
+                    }
                 }
             });
             if !self.state.cfg.valid() {
@@ -375,18 +662,64 @@ impl UiApp {
 
         egui::Panel::right("side").exact_size(300.0).show(ui, |ui| {
             let (tick, paused, err) = match &self.view {
-                Some(v) => (v.sim.tick(), v.paused, v.last_err.clone()),
+                Some(v) => (v.sim_ref().tick(), v.paused, v.last_err.clone()),
                 None => (0, false, None),
             };
-            let winner = self
-                .view
-                .as_ref()
-                .map_or(0, |v| v.sim.players[0].winner.max(v.sim.players[1].winner));
+            let winner = self.view.as_ref().map_or(0, |v| {
+                v.sim_ref().players[0]
+                    .winner
+                    .max(v.sim_ref().players[1].winner)
+            });
 
             ui.heading(if it { "Partita" } else { "Match" });
+            // --- Multiplayer overlay: peers, latency, desync/rejoin ---
+            if self.view.as_ref().is_some_and(|v| v.net_mode) {
+                let (peers, rtt, desync, err) = {
+                    let m = &self.net_mirror;
+                    (
+                        m.connected_count(),
+                        m.last_rtt_millis,
+                        m.desync,
+                        m.error.clone(),
+                    )
+                };
+                let max_p = self
+                    .net_mirror
+                    .lobby
+                    .as_ref()
+                    .map_or(2, |l| l.max_players as usize);
+                ui.label(format!("Peers: {peers}/{max_p}"));
+                if let Some(r) = rtt {
+                    ui.label(format!("RTT {r}ms"));
+                }
+                if let Some((tick, exp, got)) = desync {
+                    ui.colored_label(
+                        Color32::RED,
+                        RichText::new(format!("DESYNC t{tick} (host {exp} vs local {got})"))
+                            .size(16.0)
+                            .strong(),
+                    );
+                }
+                if (err.is_some() || desync.is_some())
+                    && ui
+                        .button(if it { "Riconnnetti (rejoin)" } else { "Rejoin" })
+                        .clicked()
+                {
+                    if let Some(h) = self.net.handle() {
+                        h.request_reconnect();
+                    }
+                }
+                if let Some(e) = err {
+                    ui.colored_label(Color32::RED, e);
+                }
+            }
             ui.horizontal(|ui| {
                 if ui.button(if paused { "▶" } else { "⏸" }).clicked() {
-                    if let Some(v) = &mut self.view {
+                    if let Some(h) = self.net.handle() {
+                        if h.is_host {
+                            h.pause(!paused);
+                        }
+                    } else if let Some(v) = &mut self.view {
                         v.paused = !v.paused;
                     }
                 }
@@ -411,7 +744,7 @@ impl UiApp {
             }
             ui.separator();
             if let Some(v) = &self.view {
-                let p = &v.sim.players[self.local as usize];
+                let p = &v.sim_ref().players[self.local as usize];
                 ui.horizontal(|ui| {
                     ui.label("P1:");
                     ui.label(format!(
@@ -454,7 +787,7 @@ impl UiApp {
             }
 
             if let Some(v) = &self.view {
-                let bar = v.sim.first_building_entity_of(self.local, 3);
+                let bar = v.sim_ref().first_building_entity_of(self.local, 3);
                 if bar != 0 {
                     ui.separator();
                     ui.label(RichText::new(if it { "Addestra" } else { "Train" }).strong());
@@ -478,6 +811,12 @@ impl UiApp {
                 .button(if it { "Torna al menu" } else { "Back to menu" })
                 .clicked()
             {
+                if self.net.handle().is_some() {
+                    self.net.stop();
+                    self.lobby = None;
+                    self.net_mirror = NetMirror::default();
+                    self.view = None;
+                }
                 self.state.back_to_menu();
             }
         });
