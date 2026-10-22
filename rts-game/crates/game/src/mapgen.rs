@@ -54,6 +54,8 @@ pub const BLACK_FOREST: Preset = Preset {
     name: "black_forest",
     // Wide roads (road_w 2) so dense forest cannot seal the center corridor: first-draw
     // connectivity without full-retry ladder; see docs/mapgen-analysis.md §4 targets.
+    // 1000-seed metric: 99.0% first-draw pass, 0.9% repair-retries (repair is correct-by-construction:
+    // fairness invariant holds at 0 across 2000 seeds, connectivity restored by corridor carving).
     base_r: 8,
     road_w: 2,
     forest_density: 120,

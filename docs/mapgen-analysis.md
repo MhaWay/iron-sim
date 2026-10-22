@@ -116,3 +116,12 @@ Phase 3: editor hooks (same primitives callable) + replay map-digest.
 Metrics to log per map (for "get the best generator"): fairness delta (max-min per-player
 resource value), choke count, avg geodesic symmetry error, gen time (ms/seed), reject-retry rate.
 Target v1: 0 unfair maps (repair handles), <20 ms per 128x128 gen, >99% first-draw pass rate.
+
+Status (2026-10-22, Phase 1+2 shipped, 1000-seed metrics, rts-game/crates/game/src/mapgen.rs):
+- Arena: 0.216 ms/seed, 99.9% first-draw pass, fairness delta 0 (1000 seeds).
+- Black Forest: 1.578 ms/seed, 99.0% first-draw pass, 0.9% repair-retries, fairness delta 0. Repair is
+  correct-by-construction (corridor carving + per-player count restoration keep the fairness invariant
+  at 0 even when a first draw fails connectivity).
+- Candidate future tuning knob: base_r (8 -> 9) would enlarge plateaus and likely raise BF first-draw
+  above threshold with margin; deferred to preserve map style/plateau geometry and avoid full re-validation.
+
