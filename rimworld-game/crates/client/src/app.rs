@@ -91,6 +91,11 @@ impl UiApp {
 
 impl eframe::App for UiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        static UI1: std::sync::Once = std::sync::Once::new();
+        UI1.call_once(|| {
+            let scr = format!("{:?}", self.state.screen);
+            crate::diag::line(&format!("first ui() draw, screen={scr}, pixels_per_point={}", ui.ctx().pixels_per_point()));
+        });
         match self.state.screen {
             Screen::Menu => self.menu_ui(ui),
             Screen::NewColony => self.new_ui(ui),

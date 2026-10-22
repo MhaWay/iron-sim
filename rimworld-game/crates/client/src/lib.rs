@@ -2,6 +2,7 @@
 //! view types may use f32/f64 — the sim crates must not (see crates/sim AGENTS golden rules).
 
 pub mod app;
+pub mod diag;
 pub mod game;
 pub mod i18n;
 pub mod save;
